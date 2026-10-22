@@ -1,0 +1,14 @@
+{
+  "appParamsRoot": "",
+  "serviceFolder": "",
+  "selectedService": "my-service",
+  "selectedTemplate": "appsettings.deploy.j2",
+  "defaultTemplateHtml": "",
+  "keyDescriptions": {},
+  "services": {
+    "my-service": {
+      "displayName": "Название сервиса",
+      "team": "Название команды"
+    }
+  }
+}

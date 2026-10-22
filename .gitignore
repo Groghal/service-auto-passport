@@ -1,0 +1,7 @@
+**/bin/
+**/obj/
+settings.json
+artifacts/
+.idea/
+.nodeterm/
+.nodeterm/project.json
