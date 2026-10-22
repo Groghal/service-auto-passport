@@ -123,8 +123,8 @@ internal sealed partial class PassportTemplateRenderer
         IReadOnlyDictionary<string, string>? keyDescriptions, IReadOnlySet<string>? htmlDescriptionKeys)
     {
         var rows = Rows(table).ToArray();
-        if (rows.Length < 2) throw new InvalidDataException("В таблице микросервисов нет строки-образца.");
-        var sample = rows[1].CloneNode(true);
+        if (rows.Length == 0) throw new InvalidDataException("В таблице микросервисов нет заголовка.");
+        var sample = rows.Length > 1 ? rows[1].CloneNode(true) : SampleRowFromHeader(rows[0]);
         var parent = rows[0].ParentNode ?? throw MissingCell("Используемые микросервисы test");
         var comments = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var row in rows.Skip(1))
@@ -177,15 +177,23 @@ internal sealed partial class PassportTemplateRenderer
 
     private static void PruneVariableCell(HtmlNode cell, HashSet<string> allVariables)
     {
+        var changedParagraphs = new HashSet<HtmlNode>();
         foreach (var node in cell.DescendantsAndSelf().Where(node => node.NodeType == HtmlNodeType.Text).ToArray())
         {
             if (!VariableRegex().IsMatch(node.InnerText)) continue;
+            var paragraph = node.Ancestors("p").FirstOrDefault();
+            if (paragraph is not null) changedParagraphs.Add(paragraph);
             var replacement = VariableRegex().Replace(node.InnerText,
                 match => allVariables.Contains(match.Value) ? match.Value : "");
-            if (string.IsNullOrWhiteSpace(replacement) && node.ParentNode?.Name == "p")
-                node.ParentNode.Remove();
-            else
-                node.InnerHtml = WebUtility.HtmlEncode(replacement);
+            node.InnerHtml = WebUtility.HtmlEncode(replacement);
+        }
+
+        foreach (var paragraph in changedParagraphs)
+        {
+            if (Normalize(paragraph.InnerText).Length == 0 &&
+                !paragraph.Descendants().Any(node => node.Name is "img" or "a" or "table" ||
+                    node.Attributes["data-macro-name"] is not null))
+                paragraph.Remove();
         }
     }
 
@@ -199,8 +207,8 @@ internal sealed partial class PassportTemplateRenderer
         IReadOnlySet<string>? htmlDescriptionKeys)
     {
         var rows = Rows(table).ToArray();
-        if (rows.Length < 2) throw new InvalidDataException("В таблице параметров нет строки-образца.");
-        var sample = rows[1].CloneNode(true);
+        if (rows.Length == 0) throw new InvalidDataException("В таблице параметров нет заголовка.");
+        var sample = rows.Length > 1 ? rows[1].CloneNode(true) : SampleRowFromHeader(rows[0]);
         var originals = new Dictionary<string, HtmlNode>(StringComparer.Ordinal);
         foreach (var row in rows.Skip(1))
         {
@@ -247,6 +255,24 @@ internal sealed partial class PassportTemplateRenderer
         htmlDescriptionKeys?.Contains(key) == true
             ? DescriptionHtml.Normalize(value)
             : $"<p>{WebUtility.HtmlEncode(value)}</p>";
+
+    private static HtmlNode SampleRowFromHeader(HtmlNode header)
+    {
+        var row = HtmlNode.CreateNode("<tr></tr>");
+        foreach (var heading in Cells(header))
+        {
+            var cell = HtmlNode.CreateNode("<td><br /></td>");
+            var className = heading.GetAttributeValue("class", "");
+            if (className.Length > 0)
+                cell.SetAttributeValue("class", className.Replace("confluenceTh", "confluenceTd",
+                    StringComparison.Ordinal));
+            var style = heading.GetAttributeValue("style", "");
+            if (style.Length > 0) cell.SetAttributeValue("style", style);
+            row.AppendChild(cell);
+        }
+
+        return row;
+    }
 
     private static HtmlNode FindTable(IEnumerable<HtmlNode> tables, string first, string second, bool matchAnyRow = false)
     {

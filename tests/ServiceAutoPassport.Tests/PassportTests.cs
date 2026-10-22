@@ -142,6 +142,35 @@ public sealed class PassportTests
     }
 
     [Fact]
+    public void GeneratedPageCanBeRegeneratedAfterTablesBecomeHeaderOnly()
+    {
+        using var fixture = new Fixture();
+        fixture.Write("app-params/.git/config", "[remote \"origin\"]\n  url = git@gitlab.example:team/app-params.git\n");
+        fixture.Write("component/.git/config", "[remote \"origin\"]\n  url = git@gitlab.example:team/component.git\n");
+        fixture.Write("app-params/application.yml", "cpu_req: 0.2\n");
+        fixture.Write("component/demo/appsettings.deploy.j2", "no variables");
+        var options = new PassportOptions("demo", fixture.PathTo("app-params"),
+            fixture.PathTo("component/demo/appsettings.deploy.j2"));
+
+        var first = PassportGenerator.Generate(CfHtml.Build(TestTemplate.FullPage), options);
+        var firstDocument = new HtmlDocument();
+        firstDocument.LoadHtml(first.HtmlFragment);
+        var firstTables = firstDocument.DocumentNode.Descendants("table").ToArray();
+        Assert.Single(firstTables[1].Descendants("tr"));
+        Assert.Single(firstTables[4].Descendants("tr"));
+
+        fixture.Write("component/demo/appsettings.deploy.j2", "{{ SVC_TEST_API }} {{ TEST_SETTING }}");
+        var second = PassportGenerator.Generate(CfHtml.Build(first.HtmlFragment), options);
+        var secondDocument = new HtmlDocument();
+        secondDocument.LoadHtml(second.HtmlFragment);
+        var secondTables = secondDocument.DocumentNode.Descendants("table").ToArray();
+        Assert.Equal("SVC_TEST_API", Cell(FindRow(secondTables[1], "SVC_TEST_API"), 0));
+        Assert.Equal("TEST_SETTING", Cell(FindRow(secondTables[4], "TEST_SETTING"), 1));
+        Assert.All(secondTables[1].Descendants("tr").Skip(1), row =>
+            Assert.All(Cells(row), cell => Assert.Equal("td", cell.Name)));
+    }
+
+    [Fact]
     public void IdentityFieldsPreserveConfluenceHtmlFragmentsAndMacroMetadata()
     {
         using var fixture = new Fixture();
@@ -399,6 +428,55 @@ public sealed class PassportTests
         Assert.Equal(2, imported.Count);
         Assert.Equal("Платёжный API", imported["SVC_PAYMENT_API"]);
         Assert.Equal("Секретный токен доступа", imported["PRIVATE_TOKEN"]);
+    }
+
+    [Fact]
+    public void AccessRowsKeepOnlyVariablesPresentInDeployOrSecrets()
+    {
+        using var fixture = new Fixture();
+        fixture.Write("app-params/.git/config", "[remote \"origin\"]\n  url = git@gitlab.example:team/app-params.git\n");
+        fixture.Write("component/.git/config", "[remote \"origin\"]\n  url = git@gitlab.example:team/component.git\n");
+        fixture.Write("app-params/application.yml", "cpu_req: 0.2\n");
+        fixture.Write("component/demo/appsettings.deploy.j2",
+            "{{ DB_PRO_PRODUCTS_HOST }} {{ DB_PRO_PLATFORM_HOST }}");
+        fixture.Write("component/demo/appsettings.secrets.j2",
+            "ConnectionStrings__TestAppDB: Host={{ DB_PRO_PLATFORM_HOST }};" +
+            "Password={{ DB_PRO_PRODUCTS_PASSWORD }}\n");
+
+        var template = new HtmlDocument();
+        template.LoadHtml(TestTemplate.FullPage);
+        var access = template.DocumentNode.Descendants("table").ElementAt(2);
+        access.AppendChild(HtmlNode.CreateNode("<tr><td>БД</td>" +
+            "<td><p>DB_PRO_PRODUCTS_HOST DB_PRO_PRODUCTS_PORT</p></td>" +
+            "<td><p><strong>DB_PRO_PRODUCTS_PASSWORD</strong> DB_PRO_PRODUCTS_USER</p></td>" +
+            "<td><a href=\"https://example.test/db\">Документация БД</a></td></tr>"));
+        var source = CfHtml.Build(template.DocumentNode.InnerHtml);
+        var options = new PassportOptions("demo", fixture.PathTo("app-params"),
+            fixture.PathTo("component/demo/appsettings.deploy.j2"));
+
+        var result = PassportGenerator.Generate(source, options);
+        var document = new HtmlDocument();
+        document.LoadHtml(result.HtmlFragment);
+        var tables = document.DocumentNode.Descendants("table").ToArray();
+        var database = tables[2].Descendants("tr").Single(row => Cell(row, 0) == "БД");
+        Assert.Equal("DB_PRO_PRODUCTS_HOST", Cell(database, 1));
+        Assert.Equal("DB_PRO_PRODUCTS_PASSWORD", Cell(database, 2));
+        Assert.Equal("DB_PRO_PRODUCTS_PASSWORD", Cells(database)[2].Descendants("strong").Single().InnerText);
+        Assert.Equal("https://example.test/db", Cells(database)[3].Descendants("a").Single()
+            .GetAttributeValue("href", ""));
+        Assert.DoesNotContain("DB_PRO_PRODUCTS_PORT", tables[2].InnerText);
+        Assert.DoesNotContain("DB_PRO_PRODUCTS_USER", tables[2].InnerText);
+        Assert.DoesNotContain("DB_PRO_PLATFORM_HOST", tables[2].InnerText);
+        Assert.DoesNotContain("DB_PRO_PRODUCTS_PASSWORD", tables[4].InnerText);
+
+        fixture.Write("component/demo/appsettings.deploy.j2", "{{ DB_PRO_PLATFORM_HOST }}");
+        fixture.Write("component/demo/appsettings.secrets.j2",
+            "ConnectionStrings__TestAppDB: Host={{ DB_PRO_PLATFORM_HOST }}\n");
+        var withoutMatches = PassportGenerator.Generate(source, options);
+        var withoutMatchesDocument = new HtmlDocument();
+        withoutMatchesDocument.LoadHtml(withoutMatches.HtmlFragment);
+        Assert.DoesNotContain(withoutMatchesDocument.DocumentNode.Descendants("table").ElementAt(2)
+            .Descendants("tr"), row => Cell(row, 0) == "БД");
     }
 
     [Theory]
