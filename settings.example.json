@@ -5,10 +5,15 @@
   "selectedTemplate": "appsettings.deploy.j2",
   "defaultTemplateHtml": "",
   "keyDescriptions": {},
+  "htmlDescriptionKeys": [],
   "services": {
     "my-service": {
       "displayName": "Название сервиса",
-      "team": "Название команды"
+      "team": "Название команды",
+      "displayNamePriority": true,
+      "teamPriority": true,
+      "displayNameIsHtml": false,
+      "teamIsHtml": false
     }
   }
 }

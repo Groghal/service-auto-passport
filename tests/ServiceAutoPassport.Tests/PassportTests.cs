@@ -95,6 +95,104 @@ public sealed class PassportTests
     }
 
     [Fact]
+    public void EmptyIdentityFieldsPreserveClipboardAndPriorityIsIndependent()
+    {
+        using var fixture = new Fixture();
+        fixture.Write("app-params/.git/config", "[remote \"origin\"]\n  url = git@gitlab.example:team/app-params.git\n");
+        fixture.Write("component/.git/config", "[remote \"origin\"]\n  url = git@gitlab.example:team/component.git\n");
+        fixture.Write("app-params/application.yml", "cpu_req: 0.2\n");
+        fixture.Write("component/demo/appsettings.deploy.j2", "{{ TEST_VALUE }}");
+
+        var edited = new HtmlDocument();
+        edited.LoadHtml(TestTemplate.FullPage);
+        var card = edited.DocumentNode.Descendants("table").First();
+        Cells(card.Descendants("tr").First())[^1].InnerHtml = "<p><strong>Имя из буфера</strong></p>";
+        Cells(card.Descendants("tr").Single(row => Cell(row, 0) == "Команда"))[^1].InnerHtml =
+            "<p><em>Команда из буфера</em></p>";
+        var clipboard = CfHtml.Build(edited.DocumentNode.InnerHtml);
+        var merged = TemplateValueMerger.Merge(CfHtml.Build(TestTemplate.FullPage), clipboard);
+
+        foreach (var source in new[] { clipboard, merged })
+        {
+            PassportResult Generate(string name = "", string team = "",
+                bool namePriority = true, bool teamPriority = true) =>
+                PassportGenerator.Generate(source, new PassportOptions(
+                    "demo", fixture.PathTo("app-params"), fixture.PathTo("component/demo/appsettings.deploy.j2"),
+                    name, team, DisplayNamePriority: namePriority, TeamPriority: teamPriority));
+
+            var unchanged = Generate();
+            Assert.Contains("<strong>Имя из буфера</strong>", unchanged.HtmlFragment);
+            Assert.Contains("<em>Команда из буфера</em>", unchanged.HtmlFragment);
+
+            var nameWins = Generate("Имя из формы", "Команда из формы", teamPriority: false);
+            Assert.Equal("Имя из формы", IdentityValue(nameWins, "Название сервиса"));
+            Assert.Equal("Команда из буфера", IdentityValue(nameWins, "Команда"));
+
+            var teamWins = Generate("Имя из формы", "Команда из формы", namePriority: false);
+            Assert.Equal("Имя из буфера", IdentityValue(teamWins, "Название сервиса"));
+            Assert.Equal("Команда из формы", IdentityValue(teamWins, "Команда"));
+        }
+
+        var emptyTemplateResult = PassportGenerator.Generate(CfHtml.Build(TestTemplate.FullPage),
+            new PassportOptions("demo", fixture.PathTo("app-params"),
+                fixture.PathTo("component/demo/appsettings.deploy.j2"),
+                "Запасное имя", "Запасная команда", DisplayNamePriority: false, TeamPriority: false));
+        Assert.Equal("Запасное имя", IdentityValue(emptyTemplateResult, "Название сервиса"));
+        Assert.Equal("Запасная команда", IdentityValue(emptyTemplateResult, "Команда"));
+    }
+
+    [Fact]
+    public void IdentityFieldsPreserveConfluenceHtmlFragmentsAndMacroMetadata()
+    {
+        using var fixture = new Fixture();
+        fixture.Write("app-params/.git/config", "[remote \"origin\"]\n  url = git@gitlab.example:team/app-params.git\n");
+        fixture.Write("component/.git/config", "[remote \"origin\"]\n  url = git@gitlab.example:team/component.git\n");
+        fixture.Write("app-params/application.yml", "cpu_req: 0.2\n");
+        fixture.Write("component/demo/appsettings.deploy.j2", "{{ TEST_VALUE }}");
+
+        const string macro = "<img class=\"editor-inline-macro\" " +
+            "src=\"https://confluence.example/plugins/servlet/confluence/placeholder/macro?definition=TEST\" " +
+            "data-macro-name=\"jira\" data-macro-id=\"96b2b87c-30a7-44bb-add7-bbcfa819ec7b\" " +
+            "data-macro-parameters=\"key=TEST-7|serverId=d873c574-729a-33cf-b479-11128a000000\" " +
+            "data-macro-schema-version=\"1\" />";
+        var imported = CfHtml.ExtractFragment(CfHtml.Build(macro));
+        var result = PassportGenerator.Generate(CfHtml.Build(TestTemplate.FullPage), new PassportOptions(
+            "demo", fixture.PathTo("app-params"), fixture.PathTo("component/demo/appsettings.deploy.j2"),
+            imported, "<section data-layout=\"two-column\"><p>Команда <strong>А</strong></p></section>",
+            DisplayNameIsHtml: true, TeamIsHtml: true));
+        var clipboard = CfHtml.Build(result.HtmlFragment);
+        var document = new HtmlDocument();
+        document.LoadHtml(CfHtml.ExtractFragment(clipboard));
+        var card = document.DocumentNode.Descendants("table").First();
+        var nameRow = card.Descendants("tr").First(row => Cell(row, 0) == "Название сервиса");
+        var image = Cells(nameRow)[^1].Descendants("img").Single();
+        Assert.Equal("jira", image.GetAttributeValue("data-macro-name", ""));
+        Assert.Equal("96b2b87c-30a7-44bb-add7-bbcfa819ec7b",
+            image.GetAttributeValue("data-macro-id", ""));
+        Assert.Equal("key=TEST-7|serverId=d873c574-729a-33cf-b479-11128a000000",
+            image.GetAttributeValue("data-macro-parameters", ""));
+        Assert.Equal("1", image.GetAttributeValue("data-macro-schema-version", ""));
+        Assert.Contains("placeholder/macro?definition=TEST", image.GetAttributeValue("src", ""));
+        var teamRow = card.Descendants("tr").First(row => Cell(row, 0) == "Команда");
+        var section = Cells(teamRow)[^1].Descendants("section").Single();
+        Assert.Equal("two-column", section.GetAttributeValue("data-layout", ""));
+        Assert.Equal("А", section.Descendants("strong").Single().InnerText);
+
+        var existing = new HtmlDocument();
+        existing.LoadHtml(TestTemplate.FullPage);
+        var existingCard = existing.DocumentNode.Descendants("table").First();
+        var existingName = existingCard.Descendants("tr").First(row => Cell(row, 0) == "Название сервиса");
+        Cells(existingName)[^1].InnerHtml = macro;
+        var retained = PassportGenerator.Generate(CfHtml.Build(existing.DocumentNode.InnerHtml),
+            new PassportOptions("demo", fixture.PathTo("app-params"),
+                fixture.PathTo("component/demo/appsettings.deploy.j2"),
+                "Замена", DisplayNamePriority: false));
+        Assert.Contains("data-macro-id=\"96b2b87c-30a7-44bb-add7-bbcfa819ec7b\"",
+            retained.HtmlFragment);
+        Assert.DoesNotContain("Замена", retained.HtmlFragment);
+    }
+
+    [Fact]
     public void YamlLayersUseJ2MagicWandOrderAndShallowOverride()
     {
         using var fixture = new Fixture();
@@ -246,28 +344,49 @@ public sealed class PassportTests
         fixture.Write("component/demo/secrets.j2", "{{ PRIVATE_TOKEN }}");
         var descriptions = new Dictionary<string, string>
         {
-            ["SVC_PAYMENT_API"] = "Платёжный API",
+            ["SVC_PAYMENT_API"] = "<p>Платёжный <strong>API</strong></p>",
             ["DB_PRO_PRODUCTS_DATABASE"] = "Основная БД & <хранилище>",
-            ["NEW_SETTING"] = "Новая опция",
+            ["NEW_SETTING"] = "<p>См. <a href=\"https://jira.example/browse/TEST-7\">TEST-7</a> " +
+                              "<img class=\"editor-inline-macro\" data-macro-name=\"jira\" " +
+                              "data-macro-parameters=\"key=TEST-7\" src=\"https://cnfl.example/placeholder\" /></p>",
             ["PRIVATE_TOKEN"] = "Секретный токен"
         };
+        var htmlKeys = new HashSet<string> { "SVC_PAYMENT_API", "NEW_SETTING" };
 
         var result = PassportGenerator.Generate(CfHtml.Build(TestTemplate.FullPage), new PassportOptions(
             "demo", fixture.PathTo("app-params"), fixture.PathTo("component/demo/appsettings.deploy.j2"),
-            "Демо", "Команда А", descriptions));
+            "Демо", "Команда А", descriptions, HtmlDescriptionKeys: htmlKeys));
 
         var document = new HtmlDocument();
         document.LoadHtml(result.HtmlFragment);
         var tables = document.DocumentNode.Descendants("table").ToArray();
         var serviceRow = tables[1].Descendants("tr").Skip(1).Single();
         Assert.Equal("Платёжный API", Cell(serviceRow, 0));
+        Assert.Contains("<strong>API</strong>", serviceRow.InnerHtml);
         Assert.Equal("SVC_PAYMENT_API", Cell(serviceRow, 1));
         Assert.Equal("Основная БД & <хранилище>",
             Cell(FindRow(tables[4], "DB_PRO_PRODUCTS_DATABASE"), 0));
         Assert.Contains("Основная БД &amp; &lt;хранилище&gt;", result.HtmlFragment);
-        Assert.Equal("Новая опция", Cell(FindRow(tables[4], "NEW_SETTING"), 0));
+        var jiraDescription = FindRow(tables[4], "NEW_SETTING");
+        Assert.Equal("TEST-7", jiraDescription.Descendants("a").Single().InnerText);
+        Assert.Equal("jira", jiraDescription.Descendants("img").Single()
+            .GetAttributeValue("data-macro-name", ""));
+        Assert.Equal("key=TEST-7", jiraDescription.Descendants("img").Single()
+            .GetAttributeValue("data-macro-parameters", ""));
         Assert.Equal("Секретный токен", Cell(FindRow(tables[4], "PRIVATE_TOKEN"), 0));
         Assert.Equal("Логгирование", Cell(FindRow(tables[4], "SECTION_LOGGING"), 0));
+    }
+
+    [Fact]
+    public void HtmlDescriptionDetectionAndValidation()
+    {
+        Assert.True(DescriptionHtml.LooksLikeMarkup("<a href=\"https://jira.example/browse/TEST-7\">TEST-7</a>"));
+        Assert.False(DescriptionHtml.LooksLikeMarkup("Основная БД & <хранилище>"));
+        Assert.Throws<InvalidDataException>(() => DescriptionHtml.Normalize("<script>alert(1)</script>"));
+        Assert.Throws<InvalidDataException>(() => DescriptionHtml.Normalize(
+            "<a href=\"javascript:alert(1)\">TEST-7</a>"));
+        Assert.Throws<InvalidDataException>(() => DescriptionHtml.Normalize(
+            "<img src=\"https://cnfl.example/placeholder\" onerror=\"alert(1)\">"));
     }
 
     [Fact]
@@ -321,6 +440,14 @@ public sealed class PassportTests
         Assert.Contains("600m", CardValue(tables[0], "Limits"));
         Assert.Contains("1200Mi", CardValue(tables[0], "Limits"));
         Assert.Equal("Да", Cell(FindRow(tables[4], "SAMPLE_SECRET_TOKEN"), 2));
+    }
+
+    private static string IdentityValue(PassportResult result, string label)
+    {
+        var document = new HtmlDocument();
+        document.LoadHtml(result.HtmlFragment);
+        return Cell(document.DocumentNode.Descendants("table").First().Descendants("tr")
+            .Single(row => Cell(row, 0) == label), 2);
     }
 
     private static string CardValue(HtmlNode table, string label) => Cell(

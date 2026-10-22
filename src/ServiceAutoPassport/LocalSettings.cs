@@ -18,6 +18,7 @@ internal sealed class LocalSettings
     public string DefaultTemplateHtml { get; set; } = "";
     public Dictionary<string, ServiceIdentity> Services { get; set; } = new(StringComparer.Ordinal);
     public Dictionary<string, string> KeyDescriptions { get; set; } = new(StringComparer.Ordinal);
+    public HashSet<string> HtmlDescriptionKeys { get; set; } = new(StringComparer.Ordinal);
 
     public static string FilePath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -40,6 +41,7 @@ internal sealed class LocalSettings
                 ?? new LocalSettings();
             settings.Services ??= new Dictionary<string, ServiceIdentity>(StringComparer.Ordinal);
             settings.KeyDescriptions ??= new Dictionary<string, string>(StringComparer.Ordinal);
+            settings.HtmlDescriptionKeys ??= new HashSet<string>(StringComparer.Ordinal);
             return settings;
         }
         catch (JsonException error)
@@ -59,4 +61,8 @@ internal sealed class ServiceIdentity
 {
     public string DisplayName { get; set; } = "";
     public string Team { get; set; } = "";
+    public bool DisplayNamePriority { get; set; } = true;
+    public bool TeamPriority { get; set; } = true;
+    public bool DisplayNameIsHtml { get; set; }
+    public bool TeamIsHtml { get; set; }
 }

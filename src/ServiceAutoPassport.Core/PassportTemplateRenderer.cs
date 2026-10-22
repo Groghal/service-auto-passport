@@ -35,11 +35,11 @@ internal sealed partial class PassportTemplateRenderer
         }
 
         FillCard(card, options, yaml, j2Git, yamlGit);
-        FillServices(services, mainVariables, options.KeyDescriptions);
+        FillServices(services, mainVariables, options.KeyDescriptions, options.HtmlDescriptionKeys);
         var allVariables = mainVariables.Concat(secretVariables).ToHashSet(StringComparer.Ordinal);
         var shownAccessVariables = FilterAccess(access, allVariables);
         FillParameters(parameters, mainVariables, secretVariables, shownAccessVariables, yaml,
-            options.KeyDescriptions);
+            options.KeyDescriptions, options.HtmlDescriptionKeys);
         return _document.DocumentNode.InnerHtml;
     }
 
@@ -50,8 +50,12 @@ internal sealed partial class PassportTemplateRenderer
         GitLinks j2Git,
         GitLinks yamlGit)
     {
-        SetCardValue(table, "Название сервиса", options.DisplayName);
-        SetCardValue(table, "Команда", options.Team);
+        if (!string.IsNullOrWhiteSpace(options.DisplayName))
+            SetCardValue(table, "Название сервиса", options.DisplayName,
+                options.DisplayNamePriority, options.DisplayNameIsHtml);
+        if (!string.IsNullOrWhiteSpace(options.Team))
+            SetCardValue(table, "Команда", options.Team,
+                options.TeamPriority, options.TeamIsHtml);
         var deployName = Path.GetFileName(Path.GetDirectoryName(Path.GetFullPath(options.J2File)))!
             .Replace('_', '-').Replace('.', '-').ToLowerInvariant();
         SetCardValue(table, "Название сервиса в кубере или на сервере", deployName);
@@ -85,12 +89,18 @@ internal sealed partial class PassportTemplateRenderer
                               $"<p>RAM (Mb): {WebUtility.HtmlEncode(memory)}</p>";
     }
 
-    private static void SetCardValue(HtmlNode table, string label, string value)
+    private static void SetCardValue(HtmlNode table, string label, string value,
+        bool hasPriority = true, bool isHtml = false)
     {
         var row = FindCardRow(table, label);
         var cells = Cells(row);
         if (cells.Length < 2) throw MissingCell(label);
-        cells[^1].InnerHtml = $"<p>{WebUtility.HtmlEncode(value)}</p>";
+        if (!hasPriority && (Normalize(cells[^1].InnerText).Length > 0 ||
+                             cells[^1].Descendants().Any(node => node.Name is not ("p" or "br"))))
+            return;
+        cells[^1].InnerHtml = isHtml
+            ? DescriptionHtml.Normalize(value)
+            : $"<p>{WebUtility.HtmlEncode(value)}</p>";
     }
 
     private static void SetCardLink(HtmlNode table, string label, string url)
@@ -110,7 +120,7 @@ internal sealed partial class PassportTemplateRenderer
     }
 
     private static void FillServices(HtmlNode table, IReadOnlyList<string> mainVariables,
-        IReadOnlyDictionary<string, string>? keyDescriptions)
+        IReadOnlyDictionary<string, string>? keyDescriptions, IReadOnlySet<string>? htmlDescriptionKeys)
     {
         var rows = Rows(table).ToArray();
         if (rows.Length < 2) throw new InvalidDataException("В таблице микросервисов нет строки-образца.");
@@ -134,7 +144,7 @@ internal sealed partial class PassportTemplateRenderer
             if (cells.Length < 3) throw MissingCell("Используемые микросервисы test");
             var title = keyDescriptions is not null && keyDescriptions.TryGetValue(name, out var description)
                 && !string.IsNullOrWhiteSpace(description) ? description : name;
-            cells[0].InnerHtml = $"<p>{WebUtility.HtmlEncode(title)}</p>";
+            cells[0].InnerHtml = DescriptionMarkup(name, title, htmlDescriptionKeys);
             cells[1].InnerHtml = $"<p>{WebUtility.HtmlEncode(name)}</p>";
             cells[2].InnerHtml = comments.TryGetValue(name, out var comment) ? comment : "<br />";
             parent.AppendChild(row);
@@ -185,7 +195,8 @@ internal sealed partial class PassportTemplateRenderer
         IReadOnlyList<string> secretVariables,
         HashSet<string> shownAccessVariables,
         YamlConfiguration yaml,
-        IReadOnlyDictionary<string, string>? keyDescriptions)
+        IReadOnlyDictionary<string, string>? keyDescriptions,
+        IReadOnlySet<string>? htmlDescriptionKeys)
     {
         var rows = Rows(table).ToArray();
         if (rows.Length < 2) throw new InvalidDataException("В таблице параметров нет строки-образца.");
@@ -224,13 +235,18 @@ internal sealed partial class PassportTemplateRenderer
             cells[1].InnerHtml = $"<p>{WebUtility.HtmlEncode(name)}</p>";
             if (keyDescriptions is not null && keyDescriptions.TryGetValue(name, out var description)
                 && !string.IsNullOrWhiteSpace(description))
-                cells[0].InnerHtml = $"<p>{WebUtility.HtmlEncode(description)}</p>";
+                cells[0].InnerHtml = DescriptionMarkup(name, description, htmlDescriptionKeys);
             cells[2].InnerHtml = isSecret ? "Да" : "Нет";
             if (yaml.GlobalKeys.Contains(name))
                 cells[3].InnerHtml = $"<p>{DefaultPhrase}</p>";
             parent.AppendChild(row);
         }
     }
+
+    private static string DescriptionMarkup(string key, string value, IReadOnlySet<string>? htmlDescriptionKeys) =>
+        htmlDescriptionKeys?.Contains(key) == true
+            ? DescriptionHtml.Normalize(value)
+            : $"<p>{WebUtility.HtmlEncode(value)}</p>";
 
     private static HtmlNode FindTable(IEnumerable<HtmlNode> tables, string first, string second, bool matchAnyRow = false)
     {

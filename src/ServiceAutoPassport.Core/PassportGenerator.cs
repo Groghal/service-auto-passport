@@ -6,9 +6,14 @@ public sealed record PassportOptions(
     string ServiceName,
     string YamlRoot,
     string J2File,
-    string DisplayName,
-    string Team,
-    IReadOnlyDictionary<string, string>? KeyDescriptions = null);
+    string DisplayName = "",
+    string Team = "",
+    IReadOnlyDictionary<string, string>? KeyDescriptions = null,
+    bool DisplayNamePriority = true,
+    bool TeamPriority = true,
+    IReadOnlySet<string>? HtmlDescriptionKeys = null,
+    bool DisplayNameIsHtml = false,
+    bool TeamIsHtml = false);
 
 public sealed record PassportResult(string HtmlFragment, string PlainText);
 
@@ -19,9 +24,6 @@ public static class PassportGenerator
         ArgumentNullException.ThrowIfNull(options);
         if (!File.Exists(options.J2File))
             throw new FileNotFoundException("Не найден основной J2 файл.", options.J2File);
-        if (string.IsNullOrWhiteSpace(options.DisplayName) || string.IsNullOrWhiteSpace(options.Team))
-            throw new InvalidDataException("В локальных настройках нужны displayName и team.");
-
         var mainVariables = J2Variables.Extract(File.ReadAllText(options.J2File));
         var j2Directory = Path.GetDirectoryName(Path.GetFullPath(options.J2File))!;
         var j2Name = Path.GetFileName(options.J2File);
