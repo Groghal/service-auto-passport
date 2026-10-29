@@ -7,6 +7,7 @@ namespace ServiceAutoPassport;
 
 internal sealed class MainForm : Form
 {
+    private const string WithoutJ2 = "Без J2 (для UI)";
     private readonly LocalSettings _settings;
     private readonly TextBox _appParamsRoot = new() { Dock = DockStyle.Fill };
     private readonly TextBox _serviceFolder = new() { Dock = DockStyle.Fill };
@@ -117,8 +118,8 @@ internal sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleLeft,
-            Text = "Выберите каталог app-params и папку сервиса с J2 файлами. " +
-                   "Имя сервиса предлагается по J2-папке; папка сервиса в app-params необязательна. " +
+            Text = "Выберите каталог app-params и папку сервиса. " +
+                   "Имя сервиса предлагается по папке; для UI J2 необязателен, папка сервиса в app-params необязательна. " +
                    "Для сохранения или прямого заполнения скопируйте полную страницу Confluence."
         };
         root.Controls.Add(instructions, 0, 0);
@@ -137,8 +138,8 @@ internal sealed class MainForm : Form
         AddRow(fields, 0, "Каталог app-params", _appParamsRoot,
             MakeButton("Выбрать…", (_, _) => BrowseFolder(_appParamsRoot, "Каталог app-params",
                 () => RefreshServices(preferFolder: true))));
-        AddRow(fields, 1, "Папка сервиса с J2", _serviceFolder,
-            MakeButton("Выбрать…", (_, _) => BrowseFolder(_serviceFolder, "Папка сервиса с J2", RefreshForServiceFolder)));
+        AddRow(fields, 1, "Папка сервиса", _serviceFolder,
+            MakeButton("Выбрать…", (_, _) => BrowseFolder(_serviceFolder, "Папка сервиса", RefreshForServiceFolder)));
         AddRow(fields, 2, "Имя сервиса / YAML-папка", _service,
             MakeButton("Обновить", (_, _) => TryRefresh(() => RefreshServices())));
         AddRow(fields, 3, "Основной J2 файл", _template,
@@ -281,16 +282,17 @@ internal sealed class MainForm : Form
     private void RefreshTemplates()
     {
         var preferred = _template.SelectedItem as string ?? _settings.SelectedTemplate;
-        var names = ServiceInputs.FindTemplates(_serviceFolder.Text.Trim());
+        var folder = _serviceFolder.Text.Trim();
+        var names = ServiceInputs.FindTemplates(folder);
+        var isUi = Directory.Exists(folder) && ServiceComponent.Detect(folder) == ComponentType.UI;
+        var choices = (isUi ? new[] { WithoutJ2 } : Array.Empty<string>()).Concat(names).ToList();
         _template.Items.Clear();
-        _template.Items.AddRange(names.Cast<object>().ToArray());
-        var index = names.ToList().FindIndex(name =>
-            name.Equals(preferred, StringComparison.OrdinalIgnoreCase));
+        _template.Items.AddRange(choices.Cast<object>().ToArray());
+        var index = choices.FindIndex(name => name.Equals(preferred, StringComparison.OrdinalIgnoreCase));
         if (index < 0)
-            index = names.ToList().FindIndex(name =>
-                name.Equals("appsettings.deploy.j2", StringComparison.OrdinalIgnoreCase));
-        if (index < 0 && names.Count == 1) index = 0;
-        if (index >= 0) _template.SelectedIndex = index;
+            index = choices.FindIndex(name => name.Equals("appsettings.deploy.j2", StringComparison.OrdinalIgnoreCase));
+        if (index < 0) index = names.Count == 1 ? choices.IndexOf(names[0]) : isUi ? 0 : -1;
+        _template.SelectedIndex = index;
     }
 
     private void CaptureIdentity()
@@ -427,17 +429,14 @@ internal sealed class MainForm : Form
         try
         {
             var appParamsRoot = ExistingDirectory(_appParamsRoot.Text, "каталог app-params");
-            var serviceFolder = ExistingDirectory(_serviceFolder.Text, "папку сервиса с J2");
+            var serviceFolder = ExistingDirectory(_serviceFolder.Text, "папку сервиса");
             var service = CurrentService;
             if (service.Length == 0)
                 service = ServiceInputs.SuggestServiceName(serviceFolder, ServiceInputs.FindServices(appParamsRoot));
             if (service.Length == 0)
-                throw new InvalidDataException("Укажите имя сервиса или выберите папку сервиса с J2.");
-            var template = _template.SelectedItem as string
-                ?? throw new InvalidDataException("Выберите основной J2 файл.");
-            var j2File = Path.Combine(serviceFolder, template);
-            if (!File.Exists(j2File))
-                throw new FileNotFoundException("Основной J2 файл не найден.", j2File);
+                throw new InvalidDataException("Укажите имя сервиса или выберите папку сервиса.");
+            var template = _template.SelectedItem as string;
+            var j2File = template is null or WithoutJ2 ? null : Path.Combine(serviceFolder, template);
             var clipboardHtml = WindowsClipboard.ReadHtml();
             if (!useDefaultTemplate && clipboardHtml == _generatedClipboardHtml)
                 throw new InvalidDataException("В буфере готовый паспорт. Скопируйте исходную страницу шаблона.");
@@ -449,7 +448,7 @@ internal sealed class MainForm : Form
             var options = new PassportOptions(service, appParamsRoot, j2File,
                 _displayName.Text.Trim(), _team.Text.Trim(), _settings.KeyDescriptions,
                 _displayNamePriority.Checked, _teamPriority.Checked, _settings.HtmlDescriptionKeys,
-                _displayNameHtml.Checked, _teamHtml.Checked);
+                _displayNameHtml.Checked, _teamHtml.Checked, ServiceFolder: serviceFolder);
             var result = PassportGenerator.Generate(source, options);
             var generatedHtml = CfHtml.Build(result.HtmlFragment);
             WindowsClipboard.Write(generatedHtml, result.PlainText);

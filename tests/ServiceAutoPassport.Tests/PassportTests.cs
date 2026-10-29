@@ -239,6 +239,38 @@ public sealed class PassportTests
         Assert.DoesNotContain("settings_from_service", config.GlobalKeys);
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("  \n")]
+    [InlineData("# No overrides yet\n")]
+    [InlineData("---\n")]
+    public void EmptyYamlFilesDoNotPreventGenerationOrLayering(string emptyYaml)
+    {
+        using var fixture = new Fixture();
+        fixture.Write("app-params/.git/config", "[remote \"origin\"]\n  url = git@gitlab.example:team/app-params.git\n");
+        fixture.Write("component/.git/config", "[remote \"origin\"]\n  url = git@gitlab.example:team/component.git\n");
+        fixture.Write("app-params/application.yml", emptyYaml);
+        fixture.Write("component/demo/appsettings.deploy.j2", "{{ TEST_VALUE }}");
+
+        var root = fixture.PathTo("app-params");
+        Assert.Empty(YamlConfiguration.Load(root, "demo").Values);
+        var result = PassportGenerator.Generate(CfHtml.Build(TestTemplate.FullPage), new PassportOptions(
+            "demo", root, fixture.PathTo("component/demo/appsettings.deploy.j2")));
+        var document = new HtmlDocument();
+        document.LoadHtml(result.HtmlFragment);
+        var card = document.DocumentNode.Descendants("table").First();
+        Assert.Contains("RAM (Mb): значение не найдено", CardValue(card, "Requests"));
+        Assert.Contains("RAM (Mb): значение не найдено", CardValue(card, "Limits"));
+
+        fixture.Write("app-params/application.yml", "cpu_req: 0.4\n");
+        fixture.Write("app-params/demo/demo.yml", emptyYaml);
+        var layered = YamlConfiguration.Load(root, "demo");
+        Assert.Equal("0.4", layered.Required("cpu_req"));
+
+        File.Delete(fixture.PathTo("app-params/application.yml"));
+        Assert.Empty(YamlConfiguration.Load(root, "demo").Values);
+    }
+
     [Fact]
     public void GlobalApplicationWorksWithoutServiceDirectory()
     {
@@ -267,6 +299,8 @@ public sealed class PassportTests
         Assert.Equal("указываем количество", CardValue(card, "Количество Pod"));
         Assert.Equal("исходный namespace", CardValue(card, "Namespace в K8S"));
         Assert.Contains("0.4", CardValue(card, "Requests"));
+        Assert.Contains("RAM (Mb): 512Mi", CardValue(card, "Requests"));
+        Assert.Contains("RAM (Mb): значение не найдено", CardValue(card, "Limits"));
         Assert.Contains("href=\"https://gitlab.example/team/app-params/-/tree/master\"", result.HtmlFragment);
         Assert.Contains("SVC_GLOBAL_HOST", result.HtmlFragment);
     }
@@ -326,8 +360,9 @@ public sealed class PassportTests
         Assert.Contains("Команда А", text);
         Assert.Contains("demo-api", text);
         Assert.Contains("service-prod", text);
-        Assert.Contains("0.15", text); // absent cpu_lim receives the agreed default
-        Assert.Contains("512", text);
+        Assert.Contains("CPU (доля от ядра): значение не найдено", text);
+        Assert.Contains("RAM (Mb): 256Mi", CardValue(document.DocumentNode.Descendants("table").First(), "Requests"));
+        Assert.Contains("RAM (Mb): 512Mi", CardValue(document.DocumentNode.Descendants("table").First(), "Limits"));
         Assert.Contains("Кратко назначение компонента", text);
         Assert.Contains("да/нет", text);
         Assert.Contains("Для доменного API", text);
@@ -518,6 +553,104 @@ public sealed class PassportTests
         Assert.Contains("600m", CardValue(tables[0], "Limits"));
         Assert.Contains("1200Mi", CardValue(tables[0], "Limits"));
         Assert.Equal("Да", Cell(FindRow(tables[4], "SAMPLE_SECRET_TOKEN"), 2));
+    }
+
+    [Theory]
+    [InlineData("My.App.WebApi", "API", "125m", "400Mi")]
+    [InlineData("My.App.Worker", "DAEMON", "150m", "500Mi")]
+    [InlineData("my-frontend", "UI", "25m", "100Mi")]
+    public void ResourceDefaultsDependOnComponentAndExplicitValuesWin(
+        string folder, string group, string requestCpu, string limitMemory)
+    {
+        using var fixture = new Fixture();
+        fixture.Write("app-params/.git/config", "[remote \"origin\"]\n url = https://gitlab.example/app-params.git\n");
+        fixture.Write("component/.git/config", "[remote \"origin\"]\n url = https://gitlab.example/component.git\n");
+        fixture.Write("app-params/application.yaml", """
+            DEFAULT_RESOURCES_UI_REQUEST: {"cpu": "25m", "memory": "50Mi"}
+            DEFAULT_RESOURCES_UI_LIMIT: {"cpu": "50m", "memory": "100Mi"}
+            DEFAULT_RESOURCES_API_REQUEST: {"cpu": "125m", "memory": "200Mi"}
+            DEFAULT_RESOURCES_API_LIMIT: {"cpu": "200m", "memory": "400Mi"}
+            DEFAULT_RESOURCES_DAEMON_REQUEST: {"cpu": "150m", "memory": "200Mi"}
+            DEFAULT_RESOURCES_DAEMON_LIMIT: {"cpu": "200m", "memory": "500Mi"}
+            """);
+        fixture.Write($"component/{folder}/config.j2", "{{ TEST_VALUE }}");
+        var options = new PassportOptions("demo", fixture.PathTo("app-params"),
+            fixture.PathTo($"component/{folder}/config.j2"));
+        HtmlNode Card()
+        {
+            var result = PassportGenerator.Generate(CfHtml.Build(TestTemplate.FullPage), options);
+            var document = new HtmlDocument();
+            document.LoadHtml(result.HtmlFragment);
+            return document.DocumentNode.Descendants("table").First();
+        }
+        var card = Card();
+        Assert.Contains($"{requestCpu} (значение по умолчанию)", CardValue(card, "Requests"));
+        Assert.Contains($"{limitMemory} (значение по умолчанию)", CardValue(card, "Limits"));
+
+        // A later layer replaces the whole resource map, without reviving missing base fields.
+        fixture.Write("app-params/demo/demo.yml", $"DEFAULT_RESOURCES_{group}_REQUEST: {{cpu: 333m}}\nmem_req: 256\n");
+        fixture.Write("app-params/application-prod.yml", $"DEFAULT_RESOURCES_{group}_LIMIT: {{cpu: 444m}}\n");
+        fixture.Write("app-params/demo/demo-prod.yml", "cpu_lim: 900m\n");
+        card = Card();
+        Assert.Contains("333m (значение по умолчанию)", CardValue(card, "Requests"));
+        Assert.Contains("RAM (Mb): 256Mi", CardValue(card, "Requests"));
+        Assert.DoesNotContain("256Mi (значение по умолчанию)", CardValue(card, "Requests"));
+        Assert.Contains("CPU (доля от ядра): 900m", CardValue(card, "Limits"));
+        Assert.Contains("RAM (Mb): значение не найдено", CardValue(card, "Limits"));
+        Assert.DoesNotContain("(значение по умолчанию)", CardValue(card, "Limits"));
+    }
+
+    [Fact]
+    public void FrontendWithoutJ2PreservesVariableTablesAndUsesFolderLinks()
+    {
+        using var fixture = new Fixture();
+        fixture.Write("app-params/.git/config", "[remote \"origin\"]\n url = https://gitlab.example/app-params.git\n");
+        fixture.Write("component/.git/config", "[remote \"origin\"]\n url = https://gitlab.example/component.git\n");
+        fixture.Write("component/My.Front/package.json", "{}");
+        fixture.Write("app-params/application.yml", "DEFAULT_RESOURCES_UI_REQUEST: {cpu: 25m, memory: 50Mi}\n");
+        var result = PassportGenerator.Generate(CfHtml.Build(TestTemplate.FullPage),
+            new PassportOptions("demo", fixture.PathTo("app-params"), null,
+                ServiceFolder: fixture.PathTo("component/My.Front")));
+        var document = new HtmlDocument();
+        document.LoadHtml(result.HtmlFragment);
+        var tables = document.DocumentNode.Descendants("table").ToArray();
+        Assert.Equal("my-front", CardValue(tables[0], "Название сервиса в кубере"));
+        Assert.Equal("Не используется", CardValue(tables[0], "Шаблон конфига"));
+        Assert.Contains("https://gitlab.example/component", CardValue(tables[0], "Репозиторий"));
+        Assert.Contains("25m (значение по умолчанию)", CardValue(tables[0], "Requests"));
+        var original = new HtmlDocument();
+        original.LoadHtml(TestTemplate.FullPage);
+        foreach (var index in new[] { 1, 2, 4 })
+            Assert.Equal(original.DocumentNode.Descendants("table").ElementAt(index).OuterHtml, tables[index].OuterHtml);
+    }
+
+    [Theory]
+    [InlineData("service-api", ComponentType.WebApi)]
+    [InlineData("service-bff", ComponentType.WebApi)]
+    [InlineData("service-grpc", ComponentType.WebApi)]
+    [InlineData("service-scheduler", ComponentType.Daemon)]
+    [InlineData("service-integration", ComponentType.Daemon)]
+    [InlineData("service-webapi-worker", ComponentType.WebApi)]
+    public void DeploymentRegexHasPriorityOverMissingAppsettings(string name, ComponentType expected)
+    {
+        using var fixture = new Fixture();
+        fixture.Write($"component/{name}/readme.txt", "No appsettings or J2");
+        var folder = fixture.PathTo($"component/{name}");
+        Assert.Equal(expected, ServiceComponent.Detect(folder));
+        Assert.Throws<InvalidDataException>(() => PassportGenerator.Generate(CfHtml.Build(TestTemplate.FullPage),
+            new PassportOptions("demo", fixture.PathTo("app-params"), null, ServiceFolder: folder)));
+    }
+
+    [Fact]
+    public void AppsettingsSearchIsRecursiveAndUnknownTypeDoesNotUseDefaults()
+    {
+        using var fixture = new Fixture();
+        fixture.Write("component/demo/src/APPSETTINGS.deploy.J2", "");
+        fixture.Write("app-params/application.yml", "DEFAULT_RESOURCES_UI_REQUEST: {cpu: 25m}\ncpu_lim: 500m\n");
+        Assert.Equal(ComponentType.Unknown, ServiceComponent.Detect(fixture.PathTo("component/demo")));
+        var config = YamlConfiguration.Load(fixture.PathTo("app-params"), "demo");
+        Assert.Null(config.ResolveResource("cpu_req", ComponentType.Unknown, "REQUEST", "cpu").Value);
+        Assert.Equal(new ResourceValue("500m"), config.ResolveResource("cpu_lim", ComponentType.Unknown, "LIMIT", "cpu"));
     }
 
     private static string IdentityValue(PassportResult result, string label)

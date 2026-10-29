@@ -20,7 +20,9 @@ internal sealed partial class PassportTemplateRenderer
         IReadOnlyList<string> mainVariables,
         IReadOnlyList<string> secretVariables,
         GitLinks j2Git,
-        GitLinks yamlGit)
+        GitLinks yamlGit,
+        string serviceFolder,
+        ComponentType componentType)
     {
         var tables = _document.DocumentNode.Descendants("table").ToArray();
         var card = FindTable(tables, "Название сервиса", "Команда", matchAnyRow: true);
@@ -34,7 +36,8 @@ internal sealed partial class PassportTemplateRenderer
             throw new InvalidDataException("В буфере нет полного шаблона: отсутствует блок «Дополнительная информация».");
         }
 
-        FillCard(card, options, yaml, j2Git, yamlGit);
+        FillCard(card, options, yaml, j2Git, yamlGit, serviceFolder, componentType);
+        if (string.IsNullOrWhiteSpace(options.J2File)) return _document.DocumentNode.InnerHtml;
         FillServices(services, mainVariables, options.KeyDescriptions, options.HtmlDescriptionKeys);
         var allVariables = mainVariables.Concat(secretVariables).ToHashSet(StringComparer.Ordinal);
         var shownAccessVariables = FilterAccess(access, allVariables);
@@ -48,7 +51,9 @@ internal sealed partial class PassportTemplateRenderer
         PassportOptions options,
         YamlConfiguration yaml,
         GitLinks j2Git,
-        GitLinks yamlGit)
+        GitLinks yamlGit,
+        string serviceFolder,
+        ComponentType componentType)
     {
         if (!string.IsNullOrWhiteSpace(options.DisplayName))
             SetCardValue(table, "Название сервиса", options.DisplayName,
@@ -56,15 +61,14 @@ internal sealed partial class PassportTemplateRenderer
         if (!string.IsNullOrWhiteSpace(options.Team))
             SetCardValue(table, "Команда", options.Team,
                 options.TeamPriority, options.TeamIsHtml);
-        var deployName = Path.GetFileName(Path.GetDirectoryName(Path.GetFullPath(options.J2File)))!
-            .Replace('_', '-').Replace('.', '-').ToLowerInvariant();
+        var deployName = ServiceComponent.DeploymentName(serviceFolder);
         SetCardValue(table, "Название сервиса в кубере или на сервере", deployName);
         SetCardValue(table, "Сервис в кубере?", "да");
 
-        SetResources(table, "Requests", yaml.ResourceOrDefault("cpu_req", "0.15"),
-            yaml.ResourceOrDefault("mem_req", "200"));
-        SetResources(table, "Limits", yaml.ResourceOrDefault("cpu_lim", "0.15"),
-            yaml.ResourceOrDefault("mem_lim", "200"));
+        SetResources(table, "Requests", yaml.ResolveResource("cpu_req", componentType, "REQUEST", "cpu"),
+            yaml.ResolveResource("mem_req", componentType, "REQUEST", "memory"));
+        SetResources(table, "Limits", yaml.ResolveResource("cpu_lim", componentType, "LIMIT", "cpu"),
+            yaml.ResolveResource("mem_lim", componentType, "LIMIT", "memory"));
         if (yaml.OptionalAny("deploy_num", "replicas") is { } deployCount)
             SetCardValue(table, "Количество Pod", deployCount);
         if (yaml.Values.TryGetValue("autoscale", out var autoscale) && !string.IsNullOrWhiteSpace(autoscale))
@@ -76,17 +80,27 @@ internal sealed partial class PassportTemplateRenderer
         var serviceDirectory = Path.Combine(options.YamlRoot, options.ServiceName);
         SetCardLink(table, "Папка в app-params", yamlGit.TreeUrl(
             Directory.Exists(serviceDirectory) ? serviceDirectory : options.YamlRoot));
-        SetCardLink(table, "Шаблон конфига", j2Git.BlobUrl(options.J2File));
+        if (string.IsNullOrWhiteSpace(options.J2File))
+            SetCardValue(table, "Шаблон конфига", "Не используется");
+        else SetCardLink(table, "Шаблон конфига", j2Git.BlobUrl(options.J2File));
         // All other card cells retain their original HTML, including hints and links.
     }
 
-    private static void SetResources(HtmlNode table, string label, string cpu, string memory)
+    private static void SetResources(HtmlNode table, string label, ResourceValue cpu, ResourceValue memory)
     {
         var row = FindCardRow(table, label);
         var cells = Cells(row);
         if (cells.Length < 3) throw MissingCell(label);
-        cells[^1].InnerHtml = $"<p>CPU (доля от ядра): {WebUtility.HtmlEncode(cpu)}</p>" +
-                              $"<p>RAM (Mb): {WebUtility.HtmlEncode(memory)}</p>";
+        cells[^1].InnerHtml = $"<p>CPU (доля от ядра): {FormatResource(cpu)}</p>" +
+                              $"<p>RAM (Mb): {FormatResource(memory, isMemory: true)}</p>";
+    }
+
+    private static string FormatResource(ResourceValue resource, bool isMemory = false)
+    {
+        if (resource.Value is null) return "значение не найдено";
+        var value = resource.Value.Trim();
+        if (isMemory && Regex.IsMatch(value, @"^(?:\d+(?:\.\d+)?|\.\d+)$")) value += "Mi";
+        return WebUtility.HtmlEncode(value) + (resource.IsDefault ? " (значение по умолчанию)" : "");
     }
 
     private static void SetCardValue(HtmlNode table, string label, string value,

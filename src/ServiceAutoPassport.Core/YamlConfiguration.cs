@@ -2,13 +2,19 @@ using YamlDotNet.RepresentationModel;
 
 namespace ServiceAutoPassport.Core;
 
+public sealed record ResourceValue(string? Value, bool IsDefault = false);
+
 public sealed class YamlConfiguration
 {
-    private YamlConfiguration(Dictionary<string, string?> values, HashSet<string> globalKeys)
+    private YamlConfiguration(Dictionary<string, string?> values, HashSet<string> globalKeys,
+        Dictionary<string, Dictionary<string, string?>> resourceDefaults)
     {
         Values = values;
         GlobalKeys = globalKeys;
+        _resourceDefaults = resourceDefaults;
     }
+
+    private readonly Dictionary<string, Dictionary<string, string?>> _resourceDefaults;
 
     public IReadOnlyDictionary<string, string?> Values { get; }
     public IReadOnlySet<string> GlobalKeys { get; }
@@ -42,10 +48,20 @@ public sealed class YamlConfiguration
         return null;
     }
 
-    public string ResourceOrDefault(string key, string fallback)
+    public ResourceValue ResolveResource(string key, ComponentType type, string kind, string field)
     {
-        return Values.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value)
-            ? value : fallback;
+        if (OptionalAny(key) is { } explicitValue) return new ResourceValue(explicitValue);
+        var group = type switch
+        {
+            ComponentType.UI => "UI",
+            ComponentType.WebApi => "API",
+            ComponentType.Daemon => "DAEMON",
+            _ => null
+        };
+        if (group is not null && _resourceDefaults.TryGetValue($"DEFAULT_RESOURCES_{group}_{kind}", out var defaults) &&
+            defaults.TryGetValue(field, out var value) && !string.IsNullOrWhiteSpace(value))
+            return new ResourceValue(value, IsDefault: true);
+        return new ResourceValue(null);
     }
 
     public static YamlConfiguration Load(string root, string service)
@@ -73,10 +89,11 @@ public sealed class YamlConfiguration
 
         var merged = new Dictionary<string, string?>(StringComparer.Ordinal);
         var globalKeys = new HashSet<string>(StringComparer.Ordinal);
+        var resourceDefaults = new Dictionary<string, Dictionary<string, string?>>(StringComparer.Ordinal);
         foreach (var (path, global) in layers)
         {
             if (path is null) continue;
-            foreach (var (key, value) in ReadFlatYaml(path))
+            foreach (var (key, value) in ReadFlatYaml(path, resourceDefaults))
             {
                 merged[key] = value;
                 if (global) globalKeys.Add(key);
@@ -88,7 +105,7 @@ public sealed class YamlConfiguration
             throw new InvalidDataException($"Для сервиса '{service}' не найдено ни одного YAML файла.");
         }
 
-        return new YamlConfiguration(merged, globalKeys);
+        return new YamlConfiguration(merged, globalKeys, resourceDefaults);
     }
 
     private static string? FindFirst(string directory, string stem)
@@ -102,7 +119,8 @@ public sealed class YamlConfiguration
         return null;
     }
 
-    private static Dictionary<string, string?> ReadFlatYaml(string path)
+    private static Dictionary<string, string?> ReadFlatYaml(string path,
+        Dictionary<string, Dictionary<string, string?>> resourceDefaults)
     {
         using var reader = File.OpenText(path);
         var stream = new YamlStream();
@@ -115,12 +133,18 @@ public sealed class YamlConfiguration
             throw new InvalidDataException($"Не удалось прочитать YAML '{path}': {error.Message}", error);
         }
 
+        var result = new Dictionary<string, string?>(StringComparer.Ordinal);
+        if (stream.Documents.Count == 0 ||
+            stream.Documents.Count == 1 &&
+            stream.Documents[0].RootNode is YamlScalarNode empty &&
+            string.IsNullOrWhiteSpace(empty.Value))
+            return result;
+
         if (stream.Documents.Count != 1 || stream.Documents[0].RootNode is not YamlMappingNode map)
         {
             throw new InvalidDataException($"YAML должен содержать один объект с ключами: {path}");
         }
 
-        var result = new Dictionary<string, string?>(StringComparer.Ordinal);
         foreach (var (keyNode, valueNode) in map.Children)
         {
             if (keyNode is not YamlScalarNode key || string.IsNullOrWhiteSpace(key.Value))
@@ -128,6 +152,15 @@ public sealed class YamlConfiguration
                 throw new InvalidDataException($"Некорректный ключ YAML в файле {path}");
             }
 
+            if (key.Value.StartsWith("DEFAULT_RESOURCES_", StringComparison.Ordinal))
+            {
+                var resources = new Dictionary<string, string?>(StringComparer.Ordinal);
+                if (valueNode is YamlMappingNode resourceMap)
+                    foreach (var (resourceKey, resourceValue) in resourceMap.Children)
+                        if (resourceKey is YamlScalarNode { Value: { } name } && resourceValue is YamlScalarNode value)
+                            resources[name] = value.Value;
+                resourceDefaults[key.Value] = resources;
+            }
             result[key.Value] = valueNode is YamlScalarNode scalar ? scalar.Value : valueNode.ToString();
         }
 
