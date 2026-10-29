@@ -22,7 +22,8 @@ internal sealed partial class PassportTemplateRenderer
         GitLinks j2Git,
         GitLinks yamlGit,
         string serviceFolder,
-        ComponentType componentType)
+        ComponentType componentType,
+        string? allowedServicesVariable)
     {
         var tables = _document.DocumentNode.Descendants("table").ToArray();
         var card = FindTable(tables, "Название сервиса", "Команда", matchAnyRow: true);
@@ -36,7 +37,7 @@ internal sealed partial class PassportTemplateRenderer
             throw new InvalidDataException("В буфере нет полного шаблона: отсутствует блок «Дополнительная информация».");
         }
 
-        FillCard(card, options, yaml, j2Git, yamlGit, serviceFolder, componentType);
+        FillCard(card, options, yaml, j2Git, yamlGit, serviceFolder, componentType, allowedServicesVariable);
         if (string.IsNullOrWhiteSpace(options.J2File)) return _document.DocumentNode.InnerHtml;
         FillServices(services, mainVariables, options.KeyDescriptions, options.HtmlDescriptionKeys);
         var allVariables = mainVariables.Concat(secretVariables).ToHashSet(StringComparer.Ordinal);
@@ -53,7 +54,8 @@ internal sealed partial class PassportTemplateRenderer
         GitLinks j2Git,
         GitLinks yamlGit,
         string serviceFolder,
-        ComponentType componentType)
+        ComponentType componentType,
+        string? allowedServicesVariable)
     {
         if (!string.IsNullOrWhiteSpace(options.DisplayName))
             SetCardValue(table, "Название сервиса", options.DisplayName,
@@ -62,15 +64,9 @@ internal sealed partial class PassportTemplateRenderer
             SetCardValue(table, "Команда", options.Team,
                 options.TeamPriority, options.TeamIsHtml);
         if (!string.IsNullOrWhiteSpace(options.DomainApiVariable))
-        {
-            const string label = "Переменная содержащая адрес доменного API";
-            var row = Rows(table).FirstOrDefault(row => Cells(row).Take(1).Any(cell =>
-                Normalize(cell.InnerText).Contains(label, StringComparison.OrdinalIgnoreCase)))
-                ?? throw new InvalidDataException($"В шаблоне не найдена строка карточки: {label}");
-            var cells = Cells(row);
-            if (cells.Length < 2) throw MissingCell(label);
-            cells[^1].InnerHtml = $"<p>{WebUtility.HtmlEncode(options.DomainApiVariable)}</p>";
-        }
+            SetCardValueByCaption(table, "Переменная содержащая адрес доменного API", options.DomainApiVariable);
+        if (allowedServicesVariable is not null)
+            SetCardValueByCaption(table, "Переменная с ключами для предоставления доступа", allowedServicesVariable);
         var deployName = ServiceComponent.DeploymentName(serviceFolder);
         SetCardValue(table, "Название сервиса в кубере или на сервере", deployName);
         SetCardValue(table, "Сервис в кубере?", "да");
@@ -123,6 +119,16 @@ internal sealed partial class PassportTemplateRenderer
         cells[^1].InnerHtml = isHtml
             ? DescriptionHtml.Normalize(value)
             : $"<p>{WebUtility.HtmlEncode(value)}</p>";
+    }
+
+    private static void SetCardValueByCaption(HtmlNode table, string label, string value)
+    {
+        var row = Rows(table).FirstOrDefault(row => Cells(row).Take(1).Any(cell =>
+            Normalize(cell.InnerText).Contains(label, StringComparison.OrdinalIgnoreCase)))
+            ?? throw new InvalidDataException($"В шаблоне не найдена строка карточки: {label}");
+        var cells = Cells(row);
+        if (cells.Length < 2) throw MissingCell(label);
+        cells[^1].InnerHtml = $"<p>{WebUtility.HtmlEncode(value)}</p>";
     }
 
     private static void SetCardLink(HtmlNode table, string label, string url)

@@ -17,7 +17,7 @@ internal sealed class MainForm : Form
     private readonly ComboBox _domainApi = new()
     {
         Dock = DockStyle.Fill,
-        DropDownStyle = ComboBoxStyle.DropDownList,
+        DropDownStyle = ComboBoxStyle.DropDown,
         AutoCompleteSource = AutoCompleteSource.ListItems,
         AutoCompleteMode = AutoCompleteMode.SuggestAppend,
         MaxDropDownItems = 20
@@ -306,18 +306,18 @@ internal sealed class MainForm : Form
         _template.SelectedIndex = index;
     }
 
-    private string SelectedDomainApiVariable => _domainApi.SelectedItem is string value &&
+    private string SelectedDomainApiVariable => _domainApi.Text.Trim() is var value &&
         value != DomainApiFromTemplate ? value : "";
 
     private void RefreshDomainApiVariables(string preferred)
     {
         _domainApi.Items.Clear();
         _domainApi.Items.Add(DomainApiFromTemplate);
-        _domainApi.SelectedIndex = 0;
+        _domainApi.Text = string.IsNullOrWhiteSpace(preferred) ? DomainApiFromTemplate : preferred;
         if (!Directory.Exists(_appParamsRoot.Text.Trim()) || CurrentService.Length == 0) return;
         var names = ServiceInputs.FindDomainApiVariables(_appParamsRoot.Text.Trim(), CurrentService);
         _domainApi.Items.AddRange(names.Cast<object>().ToArray());
-        if (names.Contains(preferred, StringComparer.Ordinal)) _domainApi.SelectedItem = preferred;
+        _domainApi.Text = string.IsNullOrWhiteSpace(preferred) ? DomainApiFromTemplate : preferred;
     }
 
     private void CaptureIdentity()

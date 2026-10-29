@@ -826,6 +826,61 @@ public sealed class PassportTests
         Assert.Empty(expected);
     }
 
+    [Theory]
+    [InlineData("GrpcSettings__ServerSettings__AllowedServices: \"{{GRPC_SETTINGS_SERVER_SETTINGS_ALLOWED_SERVICES}}\"")]
+    [InlineData("GrpcSettings__ServerSettings__AllowedServices: '{{ GRPC_SETTINGS_SERVER_SETTINGS_ALLOWED_SERVICES }}' # comment")]
+    [InlineData("GrpcSettings__ServerSettings__AllowedServices:\n  \"{{GRPC_SETTINGS_SERVER_SETTINGS_ALLOWED_SERVICES}}\"")]
+    [InlineData("\"GrpcSettings__ServerSettings__AllowedServices\": {{GRPC_SETTINGS_SERVER_SETTINGS_ALLOWED_SERVICES}}")]
+    public void AllowedServicesAssignmentExtractsSingleVariable(string secrets)
+    {
+        Assert.Equal("GRPC_SETTINGS_SERVER_SETTINGS_ALLOWED_SERVICES", J2Variables.ExtractAssignedVariable(
+            secrets, "GrpcSettings__ServerSettings__AllowedServices"));
+    }
+
+    [Theory]
+    [InlineData("# GrpcSettings__ServerSettings__AllowedServices: '{{ WRONG_VAR }}'")]
+    [InlineData("OtherKey: '{{ WRONG_VAR }}'")]
+    [InlineData("GrpcSettings__ServerSettings__AllowedServices: literal")]
+    [InlineData("GrpcSettings__ServerSettings__AllowedServices:\nOtherKey: '{{ WRONG_VAR }}'")]
+    [InlineData("GrpcSettings__ServerSettings__AllowedServices: '{{ FIRST_VAR }} {{ SECOND_VAR }}'")]
+    public void MissingOrAmbiguousAllowedServicesDoesNotGuessVariable(string secrets)
+    {
+        Assert.Null(J2Variables.ExtractAssignedVariable(secrets, "GrpcSettings__ServerSettings__AllowedServices"));
+    }
+
+    [Theory]
+    [InlineData("appsettings.secrets.j2")]
+    [InlineData("secrets.j2")]
+    public void AllowedServicesFromSecretsFillsVaultCardAfterClipboardMerge(string secretFile)
+    {
+        using var fixture = new Fixture();
+        fixture.Write("app-params/.git/config", "[remote \"origin\"]\n url = https://gitlab.example/app-params.git\n");
+        fixture.Write("component/.git/config", "[remote \"origin\"]\n url = https://gitlab.example/component.git\n");
+        fixture.Write("app-params/application.yml", "");
+        fixture.Write("component/demo/appsettings.deploy.j2",
+            "GrpcSettings__ServerSettings__AllowedServices: '{{ WRONG_MAIN_VARIABLE }}'");
+        fixture.Write($"component/demo/{secretFile}",
+            "GrpcSettings__ServerSettings__AllowedServices: \"{{GRPC_SETTINGS_SERVER_SETTINGS_ALLOWED_SERVICES}}\"\n");
+        const string label = "Vault.Переменная с ключами для предоставления доступа";
+        var template = new HtmlDocument();
+        template.LoadHtml(TestTemplate.FullPage);
+        var row = template.DocumentNode.Descendants("tr").Single(row => Cell(row, 0) == label);
+        Cells(row)[^1].InnerHtml = "<strong>Из старой страницы</strong>";
+        var clipboard = CfHtml.Build(template.DocumentNode.InnerHtml);
+        var options = new PassportOptions("demo", fixture.PathTo("app-params"),
+            fixture.PathTo("component/demo/appsettings.deploy.j2"));
+        foreach (var source in new[] { clipboard, TemplateValueMerger.Merge(CfHtml.Build(TestTemplate.FullPage), clipboard) })
+        {
+            var result = PassportGenerator.Generate(source, options);
+            Assert.Equal("GRPC_SETTINGS_SERVER_SETTINGS_ALLOWED_SERVICES", IdentityValue(result, label));
+            fixture.Write($"component/demo/{secretFile}", "OtherKey: '{{ OTHER_SECRET }}'\n");
+            var unchanged = PassportGenerator.Generate(source, options);
+            Assert.Contains("<strong>Из старой страницы</strong>", unchanged.HtmlFragment);
+            fixture.Write($"component/demo/{secretFile}",
+                "GrpcSettings__ServerSettings__AllowedServices: '{{ GRPC_SETTINGS_SERVER_SETTINGS_ALLOWED_SERVICES }}'\n");
+        }
+    }
+
     private static string IdentityValue(PassportResult result, string label)
     {
         var document = new HtmlDocument();

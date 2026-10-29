@@ -33,6 +33,7 @@ public static class PassportGenerator
             throw new InvalidDataException("Выберите основной J2 файл. Генерация без J2 доступна только для UI.");
         IReadOnlyList<string> mainVariables = Array.Empty<string>();
         IReadOnlyList<string> secretVariables = Array.Empty<string>();
+        string? allowedServicesVariable = null;
         if (hasJ2)
         {
             if (!File.Exists(options.J2File))
@@ -45,7 +46,13 @@ public static class PassportGenerator
                 : null;
             var secretFile = namedSecretFile is not null && File.Exists(namedSecretFile)
                 ? namedSecretFile : Path.Combine(j2Directory, "secrets.j2");
-            if (File.Exists(secretFile)) secretVariables = J2Variables.Extract(File.ReadAllText(secretFile));
+            if (File.Exists(secretFile))
+            {
+                var secrets = File.ReadAllText(secretFile);
+                secretVariables = J2Variables.Extract(secrets);
+                allowedServicesVariable = J2Variables.ExtractAssignedVariable(secrets,
+                    "GrpcSettings__ServerSettings__AllowedServices");
+            }
         }
         var yaml = YamlConfiguration.Load(options.YamlRoot, options.ServiceName);
         var j2Git = GitLinks.FromPath(serviceFolder);
@@ -53,7 +60,8 @@ public static class PassportGenerator
 
         var fragment = CfHtml.ExtractFragment(clipboardHtml);
         var renderer = new PassportTemplateRenderer(fragment);
-        var resultHtml = renderer.Render(options, yaml, mainVariables, secretVariables, j2Git, yamlGit, serviceFolder, componentType);
+        var resultHtml = renderer.Render(options, yaml, mainVariables, secretVariables, j2Git, yamlGit,
+            serviceFolder, componentType, allowedServicesVariable);
         return new PassportResult(resultHtml, ToPlainText(resultHtml));
     }
 
