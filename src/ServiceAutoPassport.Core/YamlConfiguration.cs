@@ -75,6 +75,7 @@ public sealed class YamlConfiguration
         var serviceDirectory = Path.Combine(root, service);
         var hasServiceDirectory = Directory.Exists(serviceDirectory);
         var globalApplication = FindFirst(root, "application");
+        var globalProduction = FindFirst(root, "application-prod");
         if (!hasServiceDirectory && globalApplication is null)
             throw new InvalidDataException($"Каталог сервиса '{service}' отсутствует, а в {root} нет application.yml или application.yaml.");
 
@@ -82,7 +83,7 @@ public sealed class YamlConfiguration
         {
             (globalApplication, true),
             (hasServiceDirectory ? FindFirst(serviceDirectory, service) ?? FindFirst(serviceDirectory, "application") : null, false),
-            (hasServiceDirectory ? FindFirst(root, "application-prod") : null, true),
+            (globalProduction, true),
             (hasServiceDirectory ? FindFirst(serviceDirectory, service + "-prod") ??
              FindFirst(serviceDirectory, "application-prod") : null, false)
         };
@@ -95,6 +96,9 @@ public sealed class YamlConfiguration
             if (path is null) continue;
             foreach (var (key, value) in ReadFlatYaml(path, resourceDefaults))
             {
+                if (!hasServiceDirectory && path == globalProduction &&
+                    key is not ("cpu_req" or "mem_req" or "cpu_lim" or "mem_lim") &&
+                    !key.StartsWith("DEFAULT_RESOURCES_", StringComparison.Ordinal)) continue;
                 merged[key] = value;
                 if (global) globalKeys.Add(key);
             }

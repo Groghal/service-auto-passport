@@ -881,6 +881,40 @@ public sealed class PassportTests
         }
     }
 
+    [Fact]
+    public void ApiResourceDefaultsLoadFromGlobalProdWithoutServiceDirectory()
+    {
+        using var fixture = new Fixture();
+        fixture.Write("app-params/.git/config", "[remote \"origin\"]\n url = https://gitlab.example/app-params.git\n");
+        fixture.Write("component/.git/config", "[remote \"origin\"]\n url = https://gitlab.example/component.git\n");
+        fixture.Write("app-params/application.yaml", "");
+        const string defaults = """
+            DEFAULT_RESOURCES_API_REQUEST: {cpu: 125m, memory: 200Mi}
+            DEFAULT_RESOURCES_API_LIMIT: {cpu: 200m, memory: 400Mi}
+            namespace: ignored-prod-namespace
+            replicas: 9
+            """;
+        fixture.Write("app-params/application-prod.yaml", defaults);
+        fixture.Write("component/mcb-legal-adminprincipal-bff-webapi/appsettings.deploy.j2", "");
+        const string service = "mcb-legal-adminprincipal-bff-webapi";
+        Assert.False(Directory.Exists(fixture.PathTo($"app-params/{service}")));
+        var options = new PassportOptions(service, fixture.PathTo("app-params"),
+            fixture.PathTo($"component/{service}/appsettings.deploy.j2"));
+        var result = PassportGenerator.Generate(CfHtml.Build(TestTemplate.FullPage), options);
+        Assert.Contains("125m (значение по умолчанию)", IdentityValue(result, "Requests"));
+        Assert.Contains("200Mi (значение по умолчанию)", IdentityValue(result, "Requests"));
+        Assert.Contains("200m (значение по умолчанию)", IdentityValue(result, "Limits"));
+        Assert.Contains("400Mi (значение по умолчанию)", IdentityValue(result, "Limits"));
+        Assert.Equal("1", IdentityValue(result, "Количество Pod"));
+        Assert.Equal("исходный namespace", IdentityValue(result, "Namespace в K8S"));
+
+        fixture.Write("app-params/application-prod.yaml", defaults + "\ncpu_req: 333m\nmem_lim: 768Mi\n");
+        var overridden = PassportGenerator.Generate(CfHtml.Build(TestTemplate.FullPage), options);
+        Assert.Contains("CPU (доля от ядра): 333m", IdentityValue(overridden, "Requests"));
+        Assert.DoesNotContain("333m (значение по умолчанию)", IdentityValue(overridden, "Requests"));
+        Assert.Contains("RAM (Mb): 768Mi", IdentityValue(overridden, "Limits"));
+    }
+
     private static string IdentityValue(PassportResult result, string label)
     {
         var document = new HtmlDocument();
