@@ -16,9 +16,15 @@ internal static class TestTemplate
           <tr><th>Репозиторий</th><th></th><td></td></tr>
           <tr><th>Папка в app-params</th><th></th><td></td></tr>
           <tr><th>Шаблон конфига</th><th></th><td></td></tr>
+          <tr><th>Vault.Переменная с ключом сервиса</th><th></th><td></td></tr>
+          <tr><th>Vault.Переменная с ключами для предоставления доступа</th><th></th><td></td></tr>
           <tr><th>Описание</th><th></th><td>Кратко назначение компонента</td></tr>
+          <tr><th>Сетевая схема и согласование ДИБ</th><th></th><td></td></tr>
+          <tr><th>Согласование схемы ДИБ</th><th></th><td></td></tr>
           <tr><th>Стандартный HealthCheck</th><th></th><td>да/нет</td></tr>
+          <tr><th>Микрофронты (для BFF)</th><th></th><td></td></tr>
           <tr><th>Для доменного API</th><th></th><td></td></tr>
+          <tr><th>app-params. Переменная содержащая адрес доменного API</th><th></th><td></td></tr>
         </table>
         """;
 

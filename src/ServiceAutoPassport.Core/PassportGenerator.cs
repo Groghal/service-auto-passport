@@ -14,7 +14,8 @@ public sealed record PassportOptions(
     IReadOnlySet<string>? HtmlDescriptionKeys = null,
     bool DisplayNameIsHtml = false,
     bool TeamIsHtml = false,
-    string? ServiceFolder = null);
+    string? ServiceFolder = null,
+    string DomainApiVariable = "");
 
 public sealed record PassportResult(string HtmlFragment, string PlainText);
 

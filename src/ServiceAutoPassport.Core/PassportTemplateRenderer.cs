@@ -61,6 +61,16 @@ internal sealed partial class PassportTemplateRenderer
         if (!string.IsNullOrWhiteSpace(options.Team))
             SetCardValue(table, "Команда", options.Team,
                 options.TeamPriority, options.TeamIsHtml);
+        if (!string.IsNullOrWhiteSpace(options.DomainApiVariable))
+        {
+            const string label = "Переменная содержащая адрес доменного API";
+            var row = Rows(table).FirstOrDefault(row => Cells(row).Take(1).Any(cell =>
+                Normalize(cell.InnerText).Contains(label, StringComparison.OrdinalIgnoreCase)))
+                ?? throw new InvalidDataException($"В шаблоне не найдена строка карточки: {label}");
+            var cells = Cells(row);
+            if (cells.Length < 2) throw MissingCell(label);
+            cells[^1].InnerHtml = $"<p>{WebUtility.HtmlEncode(options.DomainApiVariable)}</p>";
+        }
         var deployName = ServiceComponent.DeploymentName(serviceFolder);
         SetCardValue(table, "Название сервиса в кубере или на сервере", deployName);
         SetCardValue(table, "Сервис в кубере?", "да");
@@ -69,10 +79,8 @@ internal sealed partial class PassportTemplateRenderer
             yaml.ResolveResource("mem_req", componentType, "REQUEST", "memory"));
         SetResources(table, "Limits", yaml.ResolveResource("cpu_lim", componentType, "LIMIT", "cpu"),
             yaml.ResolveResource("mem_lim", componentType, "LIMIT", "memory"));
-        if (yaml.OptionalAny("deploy_num", "replicas") is { } deployCount)
-            SetCardValue(table, "Количество Pod", deployCount);
-        if (yaml.Values.TryGetValue("autoscale", out var autoscale) && !string.IsNullOrWhiteSpace(autoscale))
-            SetCardValue(table, "Автомасштабирование", autoscale);
+        SetCardValue(table, "Количество Pod", yaml.OptionalAny("deploy_num", "replicas") ?? "1");
+        SetCardValue(table, "Автомасштабирование", yaml.OptionalAny("autoscale") ?? "нет");
         if (yaml.OptionalAny("namespace", "namespace_name") is { } namespaceName)
             SetCardValue(table, "Namespace в K8S", namespaceName);
 
@@ -290,16 +298,9 @@ internal sealed partial class PassportTemplateRenderer
         return row;
     }
 
-    private static HtmlNode FindTable(IEnumerable<HtmlNode> tables, string first, string second, bool matchAnyRow = false)
-    {
-        return tables.FirstOrDefault(table =>
-        {
-            var rows = Rows(table);
-            var cells = (matchAnyRow ? rows : rows.Take(1)).SelectMany(Cells).ToArray();
-            return cells.Any(cell => Normalize(cell.InnerText).Contains(first, StringComparison.OrdinalIgnoreCase)) &&
-                   cells.Any(cell => Normalize(cell.InnerText).Contains(second, StringComparison.OrdinalIgnoreCase));
-        }) ?? throw new InvalidDataException($"В буфере нет таблицы шаблона: {first} / {second}");
-    }
+    private static HtmlNode FindTable(IEnumerable<HtmlNode> tables, string first, string second, bool matchAnyRow = false) =>
+        TemplateTables.Find(tables, first, second, matchAnyRow)
+        ?? throw new InvalidDataException($"В буфере нет таблицы шаблона: {first} / {second}");
 
     private static IEnumerable<HtmlNode> Rows(HtmlNode table) =>
         table.Descendants("tr").Where(row => row.Ancestors("table").FirstOrDefault() == table);

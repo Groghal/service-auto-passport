@@ -7,12 +7,21 @@ namespace ServiceAutoPassport;
 
 internal sealed class MainForm : Form
 {
+    private const string DomainApiFromTemplate = "Из шаблона";
     private const string WithoutJ2 = "Без J2 (для UI)";
     private readonly LocalSettings _settings;
     private readonly TextBox _appParamsRoot = new() { Dock = DockStyle.Fill };
     private readonly TextBox _serviceFolder = new() { Dock = DockStyle.Fill };
     private readonly ComboBox _service = new() { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDown };
     private readonly ComboBox _template = new() { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly ComboBox _domainApi = new()
+    {
+        Dock = DockStyle.Fill,
+        DropDownStyle = ComboBoxStyle.DropDownList,
+        AutoCompleteSource = AutoCompleteSource.ListItems,
+        AutoCompleteMode = AutoCompleteMode.SuggestAppend,
+        MaxDropDownItems = 20
+    };
     private readonly TextBox _displayName = new() { Dock = DockStyle.Fill, PlaceholderText = "Из шаблона, если пусто" };
     private readonly TextBox _team = new() { Dock = DockStyle.Fill, PlaceholderText = "Из шаблона, если пусто" };
     private readonly CheckBox _displayNameHtml = new() { Text = "HTML", Dock = DockStyle.Fill };
@@ -46,8 +55,8 @@ internal sealed class MainForm : Form
         Font = new Font("Segoe UI", 9F);
         AutoScaleMode = AutoScaleMode.Font;
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(820, 590);
-        ClientSize = new Size(940, 610);
+        MinimumSize = new Size(820, 630);
+        ClientSize = new Size(940, 650);
 
         BuildLayout();
         SetClipboardIndicator("Проверяем буфер обмена…", Color.DimGray);
@@ -126,7 +135,7 @@ internal sealed class MainForm : Form
         _clipboardIndicator.Margin = new Padding(0, 0, 0, 8);
         root.Controls.Add(_clipboardIndicator, 0, 1);
 
-        var fields = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 5, RowCount = 6 };
+        var fields = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 5, RowCount = 7 };
         fields.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
         fields.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         fields.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 65));
@@ -147,6 +156,8 @@ internal sealed class MainForm : Form
         AddHtmlRow(fields, 4, "Название сервиса", _displayName, _displayNameHtml,
             _displayNamePriority);
         AddHtmlRow(fields, 5, "Команда", _team, _teamHtml, _teamPriority);
+        AddRow(fields, 6, "Адрес доменного API", _domainApi,
+            MakeButton("Обновить", (_, _) => TryRefresh(() => RefreshDomainApiVariables(SelectedDomainApiVariable))));
         root.Controls.Add(fields, 0, 2);
 
         var descriptions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2 };
@@ -295,11 +306,26 @@ internal sealed class MainForm : Form
         _template.SelectedIndex = index;
     }
 
+    private string SelectedDomainApiVariable => _domainApi.SelectedItem is string value &&
+        value != DomainApiFromTemplate ? value : "";
+
+    private void RefreshDomainApiVariables(string preferred)
+    {
+        _domainApi.Items.Clear();
+        _domainApi.Items.Add(DomainApiFromTemplate);
+        _domainApi.SelectedIndex = 0;
+        if (!Directory.Exists(_appParamsRoot.Text.Trim()) || CurrentService.Length == 0) return;
+        var names = ServiceInputs.FindDomainApiVariables(_appParamsRoot.Text.Trim(), CurrentService);
+        _domainApi.Items.AddRange(names.Cast<object>().ToArray());
+        if (names.Contains(preferred, StringComparer.Ordinal)) _domainApi.SelectedItem = preferred;
+    }
+
     private void CaptureIdentity()
     {
         if (_activeService is null) return;
         _settings.Services[_activeService] = new ServiceIdentity
         {
+            DomainApiVariable = SelectedDomainApiVariable,
             DisplayName = _displayName.Text.Trim(),
             Team = _team.Text.Trim(),
             DisplayNamePriority = _displayNamePriority.Checked,
@@ -321,6 +347,7 @@ internal sealed class MainForm : Form
         _teamPriority.Checked = identity?.TeamPriority ?? true;
         _displayNameHtml.Checked = identity?.DisplayNameIsHtml ?? false;
         _teamHtml.Checked = identity?.TeamIsHtml ?? false;
+        TryRefresh(() => RefreshDomainApiVariables(identity?.DomainApiVariable ?? ""));
     }
 
     private void SaveSettings()
@@ -448,7 +475,8 @@ internal sealed class MainForm : Form
             var options = new PassportOptions(service, appParamsRoot, j2File,
                 _displayName.Text.Trim(), _team.Text.Trim(), _settings.KeyDescriptions,
                 _displayNamePriority.Checked, _teamPriority.Checked, _settings.HtmlDescriptionKeys,
-                _displayNameHtml.Checked, _teamHtml.Checked, ServiceFolder: serviceFolder);
+                _displayNameHtml.Checked, _teamHtml.Checked, ServiceFolder: serviceFolder,
+                DomainApiVariable: SelectedDomainApiVariable);
             var result = PassportGenerator.Generate(source, options);
             var generatedHtml = CfHtml.Build(result.HtmlFragment);
             WindowsClipboard.Write(generatedHtml, result.PlainText);

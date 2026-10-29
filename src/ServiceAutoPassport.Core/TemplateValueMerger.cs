@@ -53,7 +53,8 @@ public static class TemplateValueMerger
     private static void MergeCard(HtmlNode target, HtmlNode? source)
     {
         if (source is null) return;
-        var sourceRows = Rows(source).GroupBy(CardRowKey, StringComparer.OrdinalIgnoreCase)
+        var sourceRows = Rows(source).Where(row => CardRowKey(row).Length > 0)
+            .GroupBy(CardRowKey, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
         foreach (var row in Rows(target))
         {
@@ -68,7 +69,18 @@ public static class TemplateValueMerger
     private static string CardRowKey(HtmlNode row)
     {
         var cells = Cells(row);
-        return string.Join("|", cells.Take(Math.Max(0, cells.Length - 1)).Select(cell => Normalize(cell.InnerText)));
+        return cells.Take(Math.Max(0, cells.Length - 1)).Select(CardLabel)
+            .FirstOrDefault(text => text.Length > 0) ?? "";
+    }
+
+    private static string CardLabel(HtmlNode cell)
+    {
+        var label = cell.CloneNode(true);
+        foreach (var hint in label.Descendants().Where(node => node.Name is "em" or "i" or "table").ToArray())
+            hint.Remove();
+        var text = label.Descendants("p").Select(paragraph => Normalize(paragraph.InnerText))
+            .FirstOrDefault(text => text.Length > 0) ?? Normalize(label.InnerText);
+        return text.TrimEnd(' ', ':', '.');
     }
 
     private static void MergeServices(HtmlNode target, HtmlNode? source)
@@ -132,14 +144,35 @@ public static class TemplateValueMerger
 
     private static void MergeAdditionalInformation(HtmlDocument target, HtmlDocument source)
     {
-        var sourceMacro = source.DocumentNode.Descendants("table").FirstOrDefault(table =>
-            table.GetAttributeValue("data-macro-name", "") == "table-excerpt");
-        var targetMacro = target.DocumentNode.Descendants("table").FirstOrDefault(table =>
-            table.GetAttributeValue("data-macro-name", "") == "table-excerpt");
+        var sourceMacro = AdditionalInformationMacro(source);
+        var targetMacro = AdditionalInformationMacro(target);
         var sourceBody = sourceMacro?.Descendants("td").FirstOrDefault();
         var targetBody = targetMacro?.Descendants("td").FirstOrDefault();
         if (sourceBody is not null && targetBody is not null && HasContent(sourceBody))
             targetBody.InnerHtml = sourceBody.InnerHtml;
+    }
+
+    private static HtmlNode? AdditionalInformationMacro(HtmlDocument document)
+    {
+        var inSection = false;
+        foreach (var node in document.DocumentNode.Descendants())
+        {
+            if (IsHeading(node))
+            {
+                if (inSection) return null;
+                inSection = Normalize(node.InnerText).Contains("Дополнительная информация", StringComparison.OrdinalIgnoreCase);
+            }
+            if (inSection && node.Name == "table" &&
+                node.GetAttributeValue("data-macro-name", "") == "table-excerpt") return node;
+        }
+        // A copied macro can omit its section heading. Accept it only when unambiguous
+        // and when it does not wrap a service card.
+        if (inSection) return null;
+        var standalone = document.DocumentNode.Descendants("table").Where(table =>
+            table.GetAttributeValue("data-macro-name", "") == "table-excerpt" &&
+            TemplateTables.Find(table.Descendants("table"), "Название сервиса", "Команда", anyRow: true) is null)
+            .ToArray();
+        return standalone.Length == 1 ? standalone[0] : null;
     }
 
     private static void MergeParagraphsByHeading(HtmlDocument target, HtmlDocument source)
@@ -173,12 +206,7 @@ public static class TemplateValueMerger
         node.Name is "h1" or "h2" or "h3" or "h4" or "h5" or "h6";
 
     private static HtmlNode? FindTable(IEnumerable<HtmlNode> tables, string first, string second, bool anyRow = false) =>
-        tables.FirstOrDefault(table =>
-        {
-            var cells = (anyRow ? Rows(table) : Rows(table).Take(1)).SelectMany(Cells).ToArray();
-            return cells.Any(cell => Normalize(cell.InnerText).Contains(first, StringComparison.OrdinalIgnoreCase)) &&
-                   cells.Any(cell => Normalize(cell.InnerText).Contains(second, StringComparison.OrdinalIgnoreCase));
-        });
+        TemplateTables.Find(tables, first, second, anyRow);
 
     private static IEnumerable<HtmlNode> Rows(HtmlNode table) =>
         table.Descendants("tr").Where(row => row.Ancestors("table").FirstOrDefault() == table);
@@ -190,7 +218,7 @@ public static class TemplateValueMerger
         @"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b").Value is { Length: > 0 } name ? name : null;
 
     private static bool HasContent(HtmlNode cell) => Normalize(cell.InnerText).Length > 0 ||
-        cell.Descendants().Any(node => node.Name is "img" or "a");
+        cell.Descendants().Any(node => node.Name is "img" or "a" || node.Attributes["data-macro-name"] is not null);
 
     private static string Normalize(string text) =>
         Regex.Replace(HtmlEntity.DeEntitize(text), @"\s+", " ").Trim();

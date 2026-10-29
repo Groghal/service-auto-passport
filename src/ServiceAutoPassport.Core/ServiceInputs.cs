@@ -4,6 +4,10 @@ namespace ServiceAutoPassport.Core;
 
 public static class ServiceInputs
 {
+    public static IReadOnlyList<string> FindDomainApiVariables(string appParamsRoot, string service) =>
+        YamlConfiguration.Load(appParamsRoot, service).Values.Keys
+            .OrderBy(name => name, StringComparer.Ordinal).ToArray();
+
     public static IReadOnlyList<string> FindServices(string appParamsRoot)
     {
         if (!Directory.Exists(appParamsRoot)) return Array.Empty<string>();

@@ -59,6 +59,7 @@ internal sealed class LocalSettings
 
 internal sealed class ServiceIdentity
 {
+    public string DomainApiVariable { get; set; } = "";
     public string DisplayName { get; set; } = "";
     public string Team { get; set; } = "";
     public bool DisplayNamePriority { get; set; } = true;

@@ -259,6 +259,8 @@ public sealed class PassportTests
         var document = new HtmlDocument();
         document.LoadHtml(result.HtmlFragment);
         var card = document.DocumentNode.Descendants("table").First();
+        Assert.Equal("1", CardValue(card, "Количество Pod"));
+        Assert.Equal("нет", CardValue(card, "Автомасштабирование"));
         Assert.Contains("RAM (Mb): значение не найдено", CardValue(card, "Requests"));
         Assert.Contains("RAM (Mb): значение не найдено", CardValue(card, "Limits"));
 
@@ -296,7 +298,7 @@ public sealed class PassportTests
         var document = new HtmlDocument();
         document.LoadHtml(result.HtmlFragment);
         var card = document.DocumentNode.Descendants("table").First();
-        Assert.Equal("указываем количество", CardValue(card, "Количество Pod"));
+        Assert.Equal("1", CardValue(card, "Количество Pod"));
         Assert.Equal("исходный namespace", CardValue(card, "Namespace в K8S"));
         Assert.Contains("0.4", CardValue(card, "Requests"));
         Assert.Contains("RAM (Mb): 512Mi", CardValue(card, "Requests"));
@@ -382,6 +384,8 @@ public sealed class PassportTests
 
         var tables = document.DocumentNode.Descendants("table").ToArray();
         Assert.Equal(1, tables[1].Descendants("tr").Count() - 1); // one SVC_ row
+        Assert.Equal("3", CardValue(tables[0], "Количество Pod"));
+        Assert.Equal("yes", CardValue(tables[0], "Автомасштабирование"));
         Assert.Equal(1, Count(tables[2], "S3"));
         Assert.Equal(0, Count(tables[2], "Kafka test"));
         Assert.Equal(1, Count(tables[2], "S3_TEST_SECRET_KEY"));
@@ -549,7 +553,7 @@ public sealed class PassportTests
         var tables = document.DocumentNode.Descendants("table").ToArray();
         Assert.Equal("2", CardValue(tables[0], "Количество Pod"));
         Assert.Equal("test-platform", CardValue(tables[0], "Namespace в K8S"));
-        Assert.Equal("max N /нет", CardValue(tables[0], "Автомасштабирование"));
+        Assert.Equal("нет", CardValue(tables[0], "Автомасштабирование"));
         Assert.Contains("600m", CardValue(tables[0], "Limits"));
         Assert.Contains("1200Mi", CardValue(tables[0], "Limits"));
         Assert.Equal("Да", Cell(FindRow(tables[4], "SAMPLE_SECRET_TOKEN"), 2));
@@ -692,6 +696,134 @@ public sealed class PassportTests
             Assert.Contains("<strong>Из буфера</strong>", Cells(FindRow(table, "PRIVATE_TOKEN"))[3].InnerHtml);
             Assert.Equal("Да", Cell(FindRow(table, "PRIVATE_TOKEN"), 2));
         }
+    }
+
+    [Fact]
+    public void DomainApiVariableComesFromYamlChoicesAndOnlyUpdatesItsCardField()
+    {
+        using var fixture = new Fixture();
+        fixture.Write("app-params/.git/config", "[remote \"origin\"]\n url = https://gitlab.example/app-params.git\n");
+        fixture.Write("component/.git/config", "[remote \"origin\"]\n url = https://gitlab.example/component.git\n");
+        fixture.Write("app-params/application.yml", "SVC_OWN_API: https://base.example\nSVC_OTHER_API: https://other.example\n");
+        fixture.Write("app-params/application-prod.yml", "SVC_OWN_API: https://prod.example\n");
+        fixture.Write("app-params/demo/demo.yml", "DOMAIN_ADDRESS: https://local.example\n");
+        fixture.Write("component/demo/appsettings.deploy.j2", "{{ SVC_OTHER_API }}");
+        var choices = ServiceInputs.FindDomainApiVariables(fixture.PathTo("app-params"), "demo");
+        Assert.Equal(new[] { "DOMAIN_ADDRESS", "SVC_OTHER_API", "SVC_OWN_API" }, choices);
+
+        const string label = "app-params. Переменная содержащая адрес доменного API";
+        var template = new HtmlDocument();
+        template.LoadHtml(TestTemplate.FullPage);
+        var card = template.DocumentNode.Descendants("table").First();
+        Cells(card.Descendants("tr").Single(row => Cell(row, 0) == label))[^1].InnerHtml =
+            "<strong>Значение страницы</strong>";
+        Cells(card.Descendants("tr").Single(row => Cell(row, 0) == "Для доменного API"))[^1].InnerHtml =
+            "Не менять";
+        var clipboard = CfHtml.Build(template.DocumentNode.InnerHtml);
+        foreach (var source in new[] { clipboard, TemplateValueMerger.Merge(CfHtml.Build(TestTemplate.FullPage), clipboard) })
+        {
+            var options = new PassportOptions("demo", fixture.PathTo("app-params"),
+                fixture.PathTo("component/demo/appsettings.deploy.j2"));
+            var unchanged = PassportGenerator.Generate(source, options);
+            Assert.Contains("<strong>Значение страницы</strong>", unchanged.HtmlFragment);
+            var result = PassportGenerator.Generate(source, options with { DomainApiVariable = "SVC_OWN_API" });
+            Assert.Equal("SVC_OWN_API", IdentityValue(result, label));
+            Assert.Equal("Не менять", IdentityValue(result, "Для доменного API"));
+            Assert.DoesNotContain("https://prod.example", result.HtmlFragment);
+        }
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public void CardValuesMergeAcrossMacroWrappersAndDifferentColumnCounts(bool wrapSource, bool wrapTarget)
+    {
+        using var fixture = new Fixture();
+        fixture.Write("app-params/.git/config", "[remote \"origin\"]\n url = https://gitlab.example/app-params.git\n");
+        fixture.Write("component/.git/config", "[remote \"origin\"]\n url = https://gitlab.example/component.git\n");
+        fixture.Write("app-params/application.yml", "namespace: runtime\n");
+        fixture.Write("component/demo/appsettings.deploy.j2", "");
+        static string Wrap(string card) => "<table data-macro-name=\"table-excerpt\" data-macro-parameters=\"name=card\">" +
+            "<tr><td><table data-macro-name=\"panel\"><tr><td>" + card + "</td></tr></table></td></tr></table>";
+        var source = new HtmlDocument();
+        source.LoadHtml(TestTemplate.FullPage);
+        var card = source.DocumentNode.Descendants("table").First();
+        foreach (var row in card.Descendants("tr").ToArray())
+            if (Cells(row).Length == 3 && Cell(row, 1).Length == 0) Cells(row)[1].Remove();
+        var team = card.Descendants("tr").Single(row => Cell(row, 0) == "Команда");
+        Cells(team)[^1].InnerHtml = "<table data-macro-name=\"panel\" data-macro-parameters=\"title=Team\">" +
+            "<tr><td><a href=\"https://example.test/team\">Команда из буфера</a></td></tr></table>";
+        var name = card.Descendants("tr").First();
+        Cells(name)[^1].InnerHtml = "<strong>Имя из буфера</strong>";
+        source.DocumentNode.Descendants("table").Single(table =>
+            table.GetAttributeValue("data-macro-name", "") == "table-excerpt").Descendants("td").First().InnerHtml =
+            "Детали дополнительной информации";
+        var sourceHtml = source.DocumentNode.InnerHtml;
+        if (wrapSource) sourceHtml = sourceHtml.Replace(card.OuterHtml, Wrap(card.OuterHtml));
+        var targetHtml = wrapTarget
+            ? TestTemplate.FullPage.Replace(TestTemplate.CardBlock, Wrap(TestTemplate.CardBlock))
+            : TestTemplate.FullPage;
+        var merged = TemplateValueMerger.Merge(CfHtml.Build(targetHtml), CfHtml.Build(sourceHtml));
+        var result = PassportGenerator.Generate(merged, new PassportOptions("demo", fixture.PathTo("app-params"),
+            fixture.PathTo("component/demo/appsettings.deploy.j2")));
+        var document = new HtmlDocument();
+        document.LoadHtml(result.HtmlFragment);
+        var teamRow = document.DocumentNode.Descendants("tr").Single(row => Cell(row, 0) == "Команда");
+        Assert.Contains("Команда из буфера", Cells(teamRow)[^1].InnerText);
+        Assert.Contains("data-macro-parameters=\"title=Team\"", Cells(teamRow)[^1].InnerHtml);
+        Assert.Contains("<strong>Имя из буфера</strong>", result.HtmlFragment);
+        Assert.Contains("Детали дополнительной информации", result.HtmlFragment);
+        Assert.Single(document.DocumentNode.Descendants("tr").Where(row => Cell(row, 0) == "Команда"));
+        var nsRow = document.DocumentNode.Descendants("tr").Single(row => Cell(row, 0) == "Namespace в K8S");
+        Assert.Equal("runtime", Cell(nsRow, Cells(nsRow).Length - 1));
+    }
+
+    [Fact]
+    public void StandaloneAdditionalInformationMacroStillMergesWithoutHeading()
+    {
+        var merged = TemplateValueMerger.Merge(CfHtml.Build(TestTemplate.FullPage), CfHtml.Build(
+            "<table data-macro-name=\"table-excerpt\"><tr><td>Детали отдельного макроса</td></tr></table>"));
+        var document = new HtmlDocument();
+        document.LoadHtml(CfHtml.ExtractFragment(merged));
+        var macro = document.DocumentNode.Descendants("table").Single(table =>
+            table.GetAttributeValue("data-macro-name", "") == "table-excerpt");
+        Assert.Equal("Детали отдельного макроса", macro.InnerText.Trim());
+    }
+
+    [Fact]
+    public void EntireCardMergesDespiteDifferentHintsAndResourceSubheadings()
+    {
+        var template = new HtmlDocument();
+        template.LoadHtml(TestTemplate.CardBlock);
+        var expected = new Dictionary<string, string>();
+        var oldCard = new StringBuilder("<table>");
+        foreach (var row in template.DocumentNode.Descendants("tr"))
+        {
+            var cells = Cells(row);
+            var label = cells.Take(cells.Length - 1).Select(cell => cell.InnerText.Trim())
+                .First(text => text.Length > 0);
+            var value = $"<table data-macro-name=\"panel\" data-macro-parameters=\"title=field-{expected.Count}\">" +
+                $"<tr><td><a href=\"https://example.test/{expected.Count}\">Значение {expected.Count}</a></td></tr></table>";
+            expected.Add(label, value);
+            oldCard.Append($"<tr><th><p><strong>{System.Net.WebUtility.HtmlEncode(label)}:</strong></p>" +
+                "<p><em>Подсказка из старой версии страницы</em></p></th>" + $"<td>{value}</td></tr>");
+        }
+        oldCard.Append("</table>");
+        static string Wrap(string card) => "<table data-macro-name=\"table-excerpt\"><tr><td>" + card + "</td></tr></table>";
+        var saved = TestTemplate.FullPage.Replace(TestTemplate.CardBlock, Wrap(TestTemplate.CardBlock));
+        var merged = TemplateValueMerger.Merge(CfHtml.Build(saved), CfHtml.Build(Wrap(oldCard.ToString())));
+        var document = new HtmlDocument();
+        document.LoadHtml(CfHtml.ExtractFragment(merged));
+        foreach (var row in document.DocumentNode.Descendants("tr").Where(row => Cells(row).Length == 3))
+        {
+            var cells = Cells(row);
+            var label = cells.Take(cells.Length - 1).Select(cell => cell.InnerText.Trim()).FirstOrDefault(text => text.Length > 0);
+            if (label is null || !expected.Remove(label, out var value)) continue;
+            Assert.Equal(value, cells[^1].InnerHtml);
+        }
+        Assert.Empty(expected);
     }
 
     private static string IdentityValue(PassportResult result, string label)
