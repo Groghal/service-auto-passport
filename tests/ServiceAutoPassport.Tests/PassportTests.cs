@@ -391,7 +391,7 @@ public sealed class PassportTests
         Assert.Equal("Да", Cell(privateToken, 2));
         Assert.Equal("", Cell(privateToken, 0));
         Assert.Equal("", Cell(privateToken, 3));
-        Assert.Equal("ИМЯ_БД_СЕРВИСА", Cell(FindRow(tables[4], "DB_PRO_PRODUCTS_DATABASE"), 3));
+        Assert.Equal("mydb", Cell(FindRow(tables[4], "DB_PRO_PRODUCTS_DATABASE"), 3));
         Assert.Equal("Дефолтное значение в базовых параметрах", Cell(FindRow(tables[4], "SECTION_LOGGING"), 3));
         Assert.Equal("Нет", Cell(FindRow(tables[4], "NEW_SETTING"), 2));
     }
@@ -651,6 +651,47 @@ public sealed class PassportTests
         var config = YamlConfiguration.Load(fixture.PathTo("app-params"), "demo");
         Assert.Null(config.ResolveResource("cpu_req", ComponentType.Unknown, "REQUEST", "cpu").Value);
         Assert.Equal(new ResourceValue("500m"), config.ResolveResource("cpu_lim", ComponentType.Unknown, "LIMIT", "cpu"));
+    }
+
+    [Fact]
+    public void ServiceParameterValuesUseFinalYamlAndPreserveMissingClipboardValues()
+    {
+        using var fixture = new Fixture();
+        fixture.Write("app-params/.git/config", "[remote \"origin\"]\n url = https://gitlab.example/app-params.git\n");
+        fixture.Write("component/.git/config", "[remote \"origin\"]\n url = https://gitlab.example/component.git\n");
+        fixture.Write("app-params/application.yml", "SECTION_LOGGING: INFO\n");
+        fixture.Write("app-params/demo/demo.yml", "DB_PRO_PRODUCTS_DATABASE: old_db\nRETRY_COUNT: 0\nFEATURE_ENABLED: false\nEMPTY_SETTING: ''\n");
+        fixture.Write("app-params/demo/demo-prod.yml", "DB_PRO_PRODUCTS_DATABASE: 'prod&<database>'\nSECTION_LOGGING: DEBUG\n");
+        fixture.Write("component/demo/appsettings.deploy.j2",
+            "{{ DB_PRO_PRODUCTS_DATABASE }} {{ SECTION_LOGGING }} {{ RETRY_COUNT }} {{ FEATURE_ENABLED }} {{ EMPTY_SETTING }} {{ UNKNOWN_SETTING }}");
+        fixture.Write("component/demo/appsettings.secrets.j2", "{{ PRIVATE_TOKEN }}");
+
+        var template = new HtmlDocument();
+        template.LoadHtml(TestTemplate.FullPage);
+        var parameters = template.DocumentNode.Descendants("table").ElementAt(4);
+        foreach (var name in new[] { "EMPTY_SETTING", "UNKNOWN_SETTING", "PRIVATE_TOKEN" })
+            parameters.AppendChild(HtmlNode.CreateNode(
+                $"<tr><td></td><td>{name}</td><td></td><td><strong>Из буфера</strong></td></tr>"));
+        var clipboard = CfHtml.Build(template.DocumentNode.InnerHtml);
+        var merged = TemplateValueMerger.Merge(CfHtml.Build(TestTemplate.FullPage), clipboard);
+        foreach (var source in new[] { clipboard, merged })
+        {
+            var result = PassportGenerator.Generate(source, new PassportOptions("demo",
+                fixture.PathTo("app-params"), fixture.PathTo("component/demo/appsettings.deploy.j2")));
+            var document = new HtmlDocument();
+            document.LoadHtml(result.HtmlFragment);
+            var table = document.DocumentNode.Descendants("table").ElementAt(4);
+            var database = Cells(FindRow(table, "DB_PRO_PRODUCTS_DATABASE"))[3];
+            Assert.Equal("prod&<database>", HtmlEntity.DeEntitize(database.InnerText));
+            Assert.DoesNotContain(database.Descendants(), node => node.Name == "database");
+            Assert.Equal("Дефолтное значение в базовых параметрах", Cell(FindRow(table, "SECTION_LOGGING"), 3));
+            Assert.Equal("0", Cell(FindRow(table, "RETRY_COUNT"), 3));
+            Assert.Equal("false", Cell(FindRow(table, "FEATURE_ENABLED"), 3));
+            Assert.Equal("", Cell(FindRow(table, "EMPTY_SETTING"), 3));
+            Assert.Contains("<strong>Из буфера</strong>", Cells(FindRow(table, "UNKNOWN_SETTING"))[3].InnerHtml);
+            Assert.Contains("<strong>Из буфера</strong>", Cells(FindRow(table, "PRIVATE_TOKEN"))[3].InnerHtml);
+            Assert.Equal("Да", Cell(FindRow(table, "PRIVATE_TOKEN"), 2));
+        }
     }
 
     private static string IdentityValue(PassportResult result, string label)

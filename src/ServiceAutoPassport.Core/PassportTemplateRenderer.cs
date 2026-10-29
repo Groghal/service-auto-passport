@@ -261,6 +261,8 @@ internal sealed partial class PassportTemplateRenderer
             cells[2].InnerHtml = isSecret ? "Да" : "Нет";
             if (yaml.GlobalKeys.Contains(name))
                 cells[3].InnerHtml = $"<p>{DefaultPhrase}</p>";
+            else if (yaml.Values.TryGetValue(name, out var value))
+                cells[3].InnerHtml = $"<p>{WebUtility.HtmlEncode(value)}</p>";
             parent.AppendChild(row);
         }
     }
