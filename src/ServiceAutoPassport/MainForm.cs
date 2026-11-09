@@ -10,6 +10,8 @@ internal sealed class MainForm : Form
     private const string DomainApiFromTemplate = "Из шаблона";
     private const string WithoutJ2 = "Без J2 (для UI)";
     private readonly LocalSettings _settings;
+    private readonly TabControl _tabs = new() { Dock = DockStyle.Fill };
+    private readonly NetworkMapControl _network;
     private readonly TextBox _appParamsRoot = new() { Dock = DockStyle.Fill };
     private readonly TextBox _serviceFolder = new() { Dock = DockStyle.Fill };
     private readonly ComboBox _service = new() { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDown };
@@ -51,14 +53,21 @@ internal sealed class MainForm : Form
     public MainForm()
     {
         _settings = LocalSettings.Load();
-        Text = "Паспорт сервиса для Confluence";
+        Text = "ServiceAutoPassport — Confluence";
         Font = new Font("Segoe UI", 9F);
         AutoScaleMode = AutoScaleMode.Font;
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(820, 630);
-        ClientSize = new Size(940, 650);
+        MinimumSize = new Size(1050, 800);
+        ClientSize = new Size(1280, 940);
 
+        _network = new NetworkMapControl(_settings);
         BuildLayout();
+        _tabs.SelectedIndexChanged += (_, _) =>
+        {
+            AcceptButton = _tabs.SelectedIndex == 0 ? _generateCurrent : _network.AnalyzeButton;
+            _network.RefreshClipboardIndicator();
+            RefreshClipboardIndicator();
+        };
         SetClipboardIndicator("Проверяем буфер обмена…", Color.DimGray);
         _status.Text = string.IsNullOrWhiteSpace(_settings.DefaultTemplateHtml)
             ? "Шаблон по умолчанию не сохранён. Скопируйте полную страницу из Confluence."
@@ -84,7 +93,7 @@ internal sealed class MainForm : Form
         _editKeyDescriptions.Click += EditKeyDescriptions;
         _generateCurrent.Click += (_, _) => GeneratePassport(useDefaultTemplate: false);
         _generateFromDefault.Click += (_, _) => GeneratePassport(useDefaultTemplate: true);
-        _clipboardTimer.Tick += (_, _) => RefreshClipboardIndicator();
+        _clipboardTimer.Tick += (_, _) => { RefreshClipboardIndicator(); _network.RefreshClipboardIndicator(); };
         Shown += (_, _) =>
         {
             RefreshClipboardIndicator();
@@ -94,6 +103,12 @@ internal sealed class MainForm : Form
         FormClosed += (_, _) => _clipboardTimer.Dispose();
         FormClosing += (_, _) =>
         {
+            try { _network.SaveInputs(); }
+            catch (Exception error)
+            {
+                MessageBox.Show(this, error.Message, "Не удалось сохранить сетевые настройки",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
             try { SaveSettings(); }
             catch (Exception error)
             {
@@ -184,7 +199,12 @@ internal sealed class MainForm : Form
         root.Controls.Add(actions, 0, 4);
         _status.AutoEllipsis = true;
         root.Controls.Add(_status, 0, 5);
-        Controls.Add(root);
+        var passportTab = new TabPage("Паспорт сервиса");
+        passportTab.Controls.Add(root);
+        var networkTab = new TabPage("Сетевые подключения");
+        networkTab.Controls.Add(_network);
+        _tabs.TabPages.AddRange(new[] { passportTab, networkTab });
+        Controls.Add(_tabs);
         AcceptButton = _generateCurrent;
     }
 
@@ -396,7 +416,7 @@ internal sealed class MainForm : Form
 
             if (html == _lastCheckedClipboardHtml) return;
             _lastCheckedClipboardHtml = html;
-            if (ClipboardTemplateProbe.LooksLikeTemplate(html))
+            if (ClipboardTemplateProbe.LooksLikeTemplate(html, includeNetwork: false))
                 SetClipboardIndicator("Шаблон распознан по характерным полям. Для прямого заполнения нужна вся страница.",
                     Color.ForestGreen);
             else

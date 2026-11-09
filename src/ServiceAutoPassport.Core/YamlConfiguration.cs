@@ -112,6 +112,33 @@ public sealed class YamlConfiguration
         return new YamlConfiguration(merged, globalKeys, resourceDefaults);
     }
 
+    public static IReadOnlyDictionary<string, string?> LoadForEnvironment(string root, string service, string environment)
+    {
+        if (service is "." or ".." || service.IndexOfAny(['/', '\\']) >= 0 ||
+            !System.Text.RegularExpressions.Regex.IsMatch(environment, @"^[A-Za-z0-9_-]+$"))
+            throw new InvalidDataException("Некорректное имя сервиса или окружения.");
+        var directory = Path.Combine(root, service);
+        var layers = new[] { FindFirst(root, "application"),
+            FindFirst(directory, service) ?? FindFirst(directory, "application"),
+            FindFirst(root, "application-" + environment),
+            FindFirst(directory, service + "-" + environment) ?? FindFirst(directory, "application-" + environment) };
+        var result = new Dictionary<string, string?>(StringComparer.Ordinal);
+        foreach (var file in layers)
+            if (file is not null)
+            {
+                // Preserve top-level parameter names and the established shallow override order.
+                try
+                {
+                    foreach (var pair in ReadFlatYaml(file, new())) result[pair.Key] = pair.Value;
+                }
+                catch (InvalidDataException error) when (error.InnerException is YamlDotNet.Core.YamlException yamlError)
+                {
+                    throw new InvalidDataException($"Ошибка YAML: {file}, строка {yamlError.Start.Line}, колонка {yamlError.Start.Column}.");
+                }
+            }
+        return result;
+    }
+
     private static string? FindFirst(string directory, string stem)
     {
         foreach (var extension in new[] { ".yml", ".yaml" })

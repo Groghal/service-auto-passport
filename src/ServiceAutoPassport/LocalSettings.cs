@@ -1,4 +1,5 @@
 using System.Text.Json;
+using ServiceAutoPassport.Core;
 
 namespace ServiceAutoPassport;
 
@@ -11,6 +12,8 @@ internal sealed class LocalSettings
         WriteIndented = true
     };
 
+    public NetworkMapSettings Network { get; set; } = new();
+    public string? NetworkAppParamsRoot { get; set; }
     public string AppParamsRoot { get; set; } = "";
     public string ServiceFolder { get; set; } = "";
     public string SelectedService { get; set; } = "";
@@ -39,6 +42,7 @@ internal sealed class LocalSettings
         {
             var settings = JsonSerializer.Deserialize<LocalSettings>(File.ReadAllText(path), JsonOptions)
                 ?? new LocalSettings();
+            settings.Network ??= new NetworkMapSettings();
             settings.Services ??= new Dictionary<string, ServiceIdentity>(StringComparer.Ordinal);
             settings.KeyDescriptions ??= new Dictionary<string, string>(StringComparer.Ordinal);
             settings.HtmlDescriptionKeys ??= new HashSet<string>(StringComparer.Ordinal);

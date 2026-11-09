@@ -5,7 +5,7 @@ namespace ServiceAutoPassport.Core;
 
 public static class ClipboardTemplateProbe
 {
-    public static bool LooksLikeTemplate(string? clipboardHtml)
+    public static bool LooksLikeTemplate(string? clipboardHtml, bool includeNetwork = true)
     {
         if (string.IsNullOrWhiteSpace(clipboardHtml)) return false;
 
@@ -26,6 +26,8 @@ public static class ClipboardTemplateProbe
         var document = new HtmlDocument();
         document.LoadHtml(fragment);
         var text = Regex.Replace(HtmlEntity.DeEntitize(document.DocumentNode.InnerText), @"\s+", " ");
+        if (includeNetwork && document.DocumentNode.Descendants().Any(n => n.GetAttributeValue("data-macro-name", "") == "drawio") &&
+            TemplateTables.Find(document.DocumentNode.Descendants("table"), "Подключение", "Параметры") is not null) return true;
         return HasAll(text, "Название сервиса", "Namespace в K8S") ||
                HasAll(text, "Переменная адреса компонента в app-params", "Комментарии") ||
                HasAll(text, "Объект доступа", "Переменная адреса в app-params") ||

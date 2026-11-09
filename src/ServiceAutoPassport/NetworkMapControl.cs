@@ -1,0 +1,244 @@
+using System.ComponentModel;
+using ServiceAutoPassport.Core;
+
+namespace ServiceAutoPassport;
+
+internal sealed class NetworkMapControl : UserControl
+{
+    private readonly LocalSettings _settings;
+    private readonly TextBox _appParamsRoot = new() { Dock = DockStyle.Fill };
+    private readonly Label _clipboardIndicator = new() { Dock = DockStyle.Fill, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft, BorderStyle = BorderStyle.FixedSingle };
+    private readonly Button _analyze = new() { Text = "Анализировать (базовый шаблон)", AutoSize = true };
+    private readonly Button _analyzeSaved = new() { Text = "Анализ: сохранённый шаблон + буфер", AutoSize = true };
+    private string _template = NetworkPageTemplates.BasicHtml;
+    private string? _clipboard;
+    private string Root => _appParamsRoot.Text.Trim();
+    public Button AnalyzeButton => _analyze;
+    private readonly BindingList<NetworkServiceInput> _services;
+    private readonly DataGridView _inputs = Grid();
+    private readonly DataGridView _review = Grid();
+    private readonly TextBox _environments = new() { Dock = DockStyle.Fill };
+    private readonly TextBox _ports = new() { Dock = DockStyle.Fill, Multiline = true, AcceptsReturn = true, ScrollBars = ScrollBars.Vertical };
+    private readonly TextBox _diagnostics = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical };
+    private readonly Button _copyPage = new() { Text = "Копировать страницу", AutoSize = true, Enabled = false };
+    private readonly Button _copyXml = new() { Text = "Копировать draw.io XML", AutoSize = true, Enabled = false };
+    private NetworkAnalysis? _analysis;
+    private bool _binding;
+    private static DataGridView Grid() => new()
+    {
+        Dock = DockStyle.Fill, AutoGenerateColumns = false, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
+        AllowUserToAddRows = false, RowHeadersVisible = false, AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCells
+    };
+    public NetworkMapControl(LocalSettings settings)
+    {
+        _settings = settings;
+        Dock = DockStyle.Fill;
+        _appParamsRoot.Text = settings.NetworkAppParamsRoot ?? settings.AppParamsRoot;
+        _services = new BindingList<NetworkServiceInput>(settings.Network.Services);
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 11, Padding = new Padding(10) };
+        foreach (var height in new[] { 45F, 35F, 35F, 35F, 170F, 30F, 90F, 32F, 75F, 0F, 80F })
+            layout.RowStyles.Add(height == 0 ? new RowStyle(SizeType.Percent, 100) : new RowStyle(SizeType.Absolute, height));
+        layout.Controls.Add(new Label { Dock = DockStyle.Fill, Text = "Добавьте main J2 каждого сервиса. Secrets подключаются автоматически. Адресные переменные (через запятую) связывают вызовы с узлами выбранных сервисов." }, 0, 0);
+        layout.Controls.Add(_clipboardIndicator, 0, 1);
+        var rootRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3 };
+        rootRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 170));
+        rootRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        rootRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
+        rootRow.Controls.Add(new Label { Text = "Каталог app-params", Dock = DockStyle.Fill });
+        rootRow.Controls.Add(_appParamsRoot);
+        var browse = new Button { Text = "Выбрать…", Dock = DockStyle.Fill };
+        browse.Click += (_, _) =>
+        {
+            using var picker = new FolderBrowserDialog { SelectedPath = Directory.Exists(Root) ? Root : "", ShowNewFolderButton = false };
+            if (picker.ShowDialog(this) == DialogResult.OK) _appParamsRoot.Text = picker.SelectedPath;
+        };
+        rootRow.Controls.Add(browse);
+        layout.Controls.Add(rootRow, 0, 2);
+        var actions = new FlowLayoutPanel { Dock = DockStyle.Fill };
+        var add = new Button { Text = "Добавить J2…", AutoSize = true };
+        add.Click += (_, _) => Run(AddFiles);
+        var remove = new Button { Text = "Удалить сервис", AutoSize = true };
+        remove.Click += (_, _) => { if (_inputs.CurrentRow?.DataBoundItem is NetworkServiceInput s) _services.Remove(s); InvalidateAnalysis(); };
+        var saveTemplate = new Button { Text = "Сохранить сетевой шаблон из буфера", AutoSize = true };
+        saveTemplate.Click += (_, _) => Run(() =>
+        {
+            var html = WindowsClipboard.ReadHtml();
+            NetworkMapGenerator.ValidateTemplate(html);
+            _settings.Network.TemplateHtml = html;
+            _settings.Save();
+            InvalidateAnalysis();
+            _analyzeSaved.Enabled = true;
+            _diagnostics.Text = "Сетевой шаблон сохранён.";
+        });
+        actions.Controls.AddRange(new Control[] { add, remove, saveTemplate }); layout.Controls.Add(actions, 0, 3);
+        foreach (var item in new[] { ("J2File", "Main J2"), ("Label", "Название"), ("YamlService", "YAML-папка"), ("AddressVariables", "Собственные адресные переменные") })
+            _inputs.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = item.Item1, HeaderText = item.Item2 });
+        _inputs.DataSource = _services; layout.Controls.Add(_inputs, 0, 4);
+        var envRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2 };
+        envRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 170)); envRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        envRow.Controls.Add(new Label { Text = "Окружения по порядку", Dock = DockStyle.Fill }); envRow.Controls.Add(_environments); layout.Controls.Add(envRow, 0, 5);
+        _environments.Text = string.Join(", ", settings.Network.Environments);
+        var portRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2 };
+        portRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 170)); portRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        portRow.Controls.Add(new Label { Text = "Порты по умолчанию\nПротокол=порт, по строке", Dock = DockStyle.Fill }); portRow.Controls.Add(_ports); layout.Controls.Add(portRow, 0, 6);
+        _ports.Text = string.Join(Environment.NewLine, settings.Network.Ports.Select(p => p.Key + "=" + p.Value));
+        var displayOptions = new FlowLayoutPanel { Dock = DockStyle.Fill };
+        var hideUnknown = new CheckBox { Text = "Не отображать неизвестные протоколы", AutoSize = true, Checked = settings.Network.Display.HideUnknownProtocols };
+        var hideParameters = new CheckBox { Text = "Не показывать названия параметров", AutoSize = true, Checked = settings.Network.Display.HideParameterNames };
+        var showKeys = new CheckBox { Text = "Показать название ключа", AutoSize = true, Checked = settings.Network.Display.ShowConfigurationKeys };
+        hideUnknown.CheckedChanged += (_, _) => settings.Network.Display.HideUnknownProtocols = hideUnknown.Checked;
+        hideParameters.CheckedChanged += (_, _) => settings.Network.Display.HideParameterNames = hideParameters.Checked;
+        showKeys.CheckedChanged += (_, _) => settings.Network.Display.ShowConfigurationKeys = showKeys.Checked;
+        displayOptions.Controls.AddRange(new Control[] { hideUnknown, hideParameters, showKeys });
+        layout.Controls.Add(displayOptions, 0, 7);
+        var generate = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true };
+        _analyze.Click += (_, _) => Run(() => Analyze(TemplateSource.Basic));
+        var analyzeClipboard = new Button { Text = "Анализ: шаблон из буфера", AutoSize = true };
+        analyzeClipboard.Click += (_, _) => Run(() => Analyze(TemplateSource.Clipboard));
+        _analyzeSaved.Click += (_, _) => Run(() => Analyze(TemplateSource.Saved));
+        _analyzeSaved.Enabled = !string.IsNullOrWhiteSpace(settings.Network.TemplateHtml);
+        generate.Controls.AddRange(new Control[] { _analyze, analyzeClipboard, _analyzeSaved, _copyPage, _copyXml }); layout.Controls.Add(generate, 0, 8);
+        layout.Controls.Add(_review, 0, 9); layout.Controls.Add(_diagnostics, 0, 10); Controls.Add(layout);
+        _appParamsRoot.TextChanged += (_, _) => InvalidateAnalysis();
+        _inputs.CellValueChanged += (_, _) => InvalidateAnalysis();
+        _environments.TextChanged += (_, _) => InvalidateAnalysis(); _ports.TextChanged += (_, _) => InvalidateAnalysis();
+        _review.CurrentCellDirtyStateChanged += (_, _) => { if (_review.IsCurrentCellDirty) _review.CommitEdit(DataGridViewDataErrorContexts.Commit); };
+        _review.CellValueChanged += (_, _) => { if (!_binding && _analysis is not null) Run(() => { NetworkMapGenerator.Refresh(_analysis, settings.Network.Ports); _review.Refresh(); }); };
+        _copyPage.Click += (_, _) => Run(() => { var result = Render(); WindowsClipboard.Write(CfHtml.Build(result.HtmlFragment), result.PlainText); _diagnostics.Text = "Страница скопирована. Вставьте её в Confluence."; });
+        _copyXml.Click += (_, _) => Run(() => { var xml = NetworkMapGenerator.CreateDiagram(ReviewedAnalysis()); Clipboard.SetDataObject(xml, true, 10, 50); _diagnostics.Text = "XML скопирован. В draw.io откройте Extras → Edit Diagram, замените XML и нажмите Apply."; });
+        _diagnostics.Text = string.IsNullOrWhiteSpace(settings.Network.TemplateHtml)
+            ? "Можно начать без буфера: добавьте сервисы и нажмите «Анализировать (базовый шаблон)»."
+            : "Сетевой шаблон сохранён. Добавьте сервисы и выполните анализ.";
+        RefreshClipboardIndicator();
+    }
+    public void RefreshClipboardIndicator()
+    {
+        try
+        {
+            NetworkMapGenerator.ValidateTemplate(WindowsClipboard.ReadHtmlOnce());
+            _clipboardIndicator.Text = "В буфере сетевой шаблон: draw.io и таблица подключений.";
+            _clipboardIndicator.ForeColor = Color.ForestGreen;
+        }
+        catch (System.Runtime.InteropServices.ExternalException)
+        {
+            _clipboardIndicator.Text = "Буфер обмена временно занят.";
+            _clipboardIndicator.ForeColor = Color.DarkGoldenrod;
+        }
+        catch (Exception)
+        {
+            _clipboardIndicator.Text = "Шаблона в буфере нет. Доступен встроенный базовый шаблон.";
+            _clipboardIndicator.ForeColor = Color.DimGray;
+        }
+    }
+
+    private void Run(Action action)
+    {
+        try { UseWaitCursor = true; action(); }
+        catch (Exception error) { MessageBox.Show(this, error.Message, "Сетевая карта", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+        finally { UseWaitCursor = false; }
+    }
+    private void InvalidateAnalysis() { _analysis = null; _copyPage.Enabled = _copyXml.Enabled = false; _review.DataSource = null; }
+    public void SaveInputs()
+    {
+        _inputs.EndEdit();
+        _settings.NetworkAppParamsRoot = Root;
+        _settings.Network.Services = _services.ToList();
+        _settings.Network.Environments = NetworkMapGenerator.Split(_environments.Text).ToList();
+        var ports = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var line in _ports.Lines.Where(s => !string.IsNullOrWhiteSpace(s)))
+        {
+            var parts = line.Split('=', 2, StringSplitOptions.TrimEntries);
+            if (parts.Length != 2 || parts[0].Length == 0 || !int.TryParse(parts[1], out var port) || port is < 1 or > 65535 || !ports.TryAdd(parts[0], port))
+                throw new InvalidDataException("Некорректная строка портов. Используйте Протокол=порт, без повторов.");
+        }
+        _settings.Network.Ports = ports;
+    }
+    private void AddFiles()
+    {
+        if (!Directory.Exists(Root)) throw new DirectoryNotFoundException("Выберите каталог app-params на вкладке сетевых подключений.");
+        using var picker = new OpenFileDialog { Multiselect = true, Filter = "J2 templates|*.j2" };
+        if (picker.ShowDialog(this) != DialogResult.OK) return;
+        foreach (var file in picker.FileNames)
+        {
+            if (Path.GetFileName(file).EndsWith("secrets.j2", StringComparison.OrdinalIgnoreCase)) continue;
+            if (_services.Any(s => s.J2File.Equals(file, StringComparison.OrdinalIgnoreCase))) continue;
+            var folder = Path.GetDirectoryName(file)!;
+            var yaml = ServiceInputs.SuggestServiceName(folder, ServiceInputs.FindServices(Root));
+            _settings.Services.TryGetValue(yaml, out var identity);
+            _services.Add(new NetworkServiceInput { J2File = file, Label = ServiceComponent.DeploymentName(folder), YamlService = yaml, AddressVariables = identity?.DomainApiVariable ?? "" });
+        }
+        InvalidateAnalysis();
+    }
+    private enum TemplateSource { Basic, Clipboard, Saved }
+
+    private void Analyze(TemplateSource source)
+    {
+        InvalidateAnalysis(); SaveInputs();
+        _clipboard = null;
+        if (source == TemplateSource.Clipboard) _clipboard = WindowsClipboard.ReadHtml();
+        else if (source == TemplateSource.Saved)
+        {
+            try { _clipboard = WindowsClipboard.ReadHtml(); }
+            catch (InvalidDataException) { }
+            catch (System.Runtime.InteropServices.ExternalException) { }
+        }
+        _template = source switch
+        {
+            TemplateSource.Clipboard => _clipboard!,
+            TemplateSource.Saved => _settings.Network.TemplateHtml,
+            _ => NetworkPageTemplates.BasicHtml
+        };
+        NetworkMapGenerator.ValidateTemplate(_template);
+        _analysis = NetworkMapGenerator.Analyze(Root, _settings.Network);
+        _binding = true;
+        try
+        {
+            _review.Columns.Clear();
+            _review.AllowUserToDeleteRows = false;
+            _review.Columns.Add(new DataGridViewCheckBoxColumn { DataPropertyName = "Include", HeaderText = "Включить", FillWeight = 35 });
+            foreach (var item in new[] { ("Service", "Сервис"), ("Path", "Путь"), ("Parameters", "Параметры"), ("Label", "Название узла") })
+                _review.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = item.Item1, HeaderText = item.Item2, ReadOnly = item.Item1 != "Label" });
+            var protocol = new DataGridViewComboBoxColumn { DataPropertyName = "Protocol", HeaderText = "Протокол" };
+            protocol.Items.AddRange(_settings.Network.Ports.Keys.Concat(new[] { "Unknown" }).Concat(_analysis.Connections.Select(c => c.Choice.Protocol)).Distinct().Cast<object>().ToArray());
+            _review.Columns.Add(protocol);
+            var targets = new[] { new Target("", "Внешний / общий узел") }.Concat(_analysis.Services.Select(s => new Target(s.Id, s.Label))).ToList();
+            _review.Columns.Add(new DataGridViewComboBoxColumn { DataPropertyName = "Target", HeaderText = "Целевой сервис", DataSource = targets, ValueMember = "Id", DisplayMember = "Label" });
+            foreach (var env in _analysis.Environments)
+                _review.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = env, ReadOnly = true, Name = env, DefaultCellStyle = new DataGridViewCellStyle { WrapMode = DataGridViewTriState.True } });
+            _review.DataSource = new BindingList<ReviewRow>(_analysis.Connections.Select(c => new ReviewRow(c)).ToList());
+            _review.CellFormatting -= FormatEndpoint; _review.CellFormatting += FormatEndpoint;
+        }
+        finally { _binding = false; }
+        _copyPage.Enabled = _copyXml.Enabled = _analysis.Connections.Count > 0;
+        _diagnostics.Text = string.Join(Environment.NewLine, _analysis.Diagnostics.Append("Проверьте протоколы и значения. Отличия адресов у общих параметров будут показаны с именами сервисов."));
+        _settings.Save();
+    }
+    private void FormatEndpoint(object? sender, DataGridViewCellFormattingEventArgs e)
+    {
+        if (_analysis is null || e.RowIndex < 0 || e.ColumnIndex < 7) return;
+        if (_review.Rows[e.RowIndex].DataBoundItem is ReviewRow row)
+            e.Value = row.Connection.Endpoints.GetValueOrDefault(_review.Columns[e.ColumnIndex].Name, "");
+    }
+    private NetworkMapResult Render() => NetworkMapGenerator.Render(_template, _clipboard, ReviewedAnalysis());
+
+    private NetworkAnalysis ReviewedAnalysis()
+    {
+        _review.EndEdit();
+        var analysis = _analysis ?? throw new InvalidDataException("Сначала выполните анализ.");
+        NetworkMapGenerator.Refresh(analysis, _settings.Network.Ports);
+        _settings.Save();
+        return analysis;
+    }
+    private sealed record Target(string Id, string Label);
+    private sealed class ReviewRow(NetworkConnection connection)
+    {
+        public NetworkConnection Connection => connection;
+        public bool Include { get => connection.Choice.Include; set => connection.Choice.Include = value; }
+        public string Service => connection.Service.Label;
+        public string Path => connection.Path;
+        public string Parameters => connection.Parameters;
+        public string Label { get => connection.Choice.Label; set => connection.Choice.Label = value; }
+        public string Protocol { get => connection.Choice.Protocol; set => connection.Choice.Protocol = value; }
+        public string Target { get => connection.Choice.TargetService; set { connection.Choice.TargetService = value; connection.Choice.TargetReviewed = true; } }
+    }
+}
