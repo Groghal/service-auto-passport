@@ -4,156 +4,425 @@ using ServiceAutoPassport.Core;
 
 namespace ServiceAutoPassport.Tests;
 
-public class NetworkLayoutTests
+public sealed class NetworkLayoutTests
 {
     private static NetworkServiceInput[] Services(int count) => Enumerable.Range(0, count).Select(i =>
         new NetworkServiceInput { J2File = Path.Combine(Path.GetTempPath(), "layout", i.ToString(), "appsettings.deploy.j2"), Label = "Service " + i }).ToArray();
-    private static NetworkConnection Edge(NetworkServiceInput source, string name, NetworkServiceInput? target = null) => new()
+
+    private static NetworkConnection Link(NetworkServiceInput service, string path, string parameter = "SHARED_HOST",
+        string name = "Backend", NetworkServiceInput? target = null, string block = "k8s", string port = "") => new()
     {
-        Service = source, Path = name, Host = "{{ SHARED_HOST }}",
-        Choice = new NetworkChoice { Label = "Shared endpoint with a long parameter name", Protocol = "HTTPS", TargetService = target?.Id ?? "" }
+        Service = service, Path = path, Host = "{{ " + parameter + " }}", Port = port,
+        ExternalTarget = new() { Label = name, Block = block },
+        Choice = new() { Protocol = "HTTPS", TargetService = target?.Id ?? "" }
     };
-    private static Dictionary<string, (double X, double Y, double W, double H)> Boxes(XDocument doc) =>
-        doc.Descendants("mxCell").Where(c => (string?)c.Attribute("vertex") == "1").ToDictionary(c => (string)c.Attribute("id")!, c =>
-        {
-            var g = c.Element("mxGeometry")!;
-            double V(string n) => double.Parse((string)g.Attribute(n)!, CultureInfo.InvariantCulture);
-            return (V("x"), V("y"), V("width"), V("height"));
-        });
+
+    private static NetworkAnalysis Analysis(NetworkServiceInput[] services, params NetworkConnection[] connections) =>
+        new(services, Array.Empty<string>(), connections, Array.Empty<string>());
+
+    private static XElement[] Cells(XDocument doc, string attr, string value) =>
+        doc.Descendants("mxCell").Where(cell => (string?)cell.Attribute(attr) == value).ToArray();
+
+    private static XElement Cell(XDocument doc, string id) => Assert.Single(Cells(doc, "id", id));
+    private static string Attr(XElement cell, string name) => (string)cell.Attribute(name)!;
+    private static double Value(XElement element, string name) => double.Parse(Attr(element, name), CultureInfo.InvariantCulture);
+    private static Dictionary<string, string> Style(XElement cell) =>
+        Attr(cell, "style").Split(';', StringSplitOptions.RemoveEmptyEntries).Select(p => p.Split('=', 2))
+            .ToDictionary(p => p[0], p => p[1]);
+
+    private record Box(double X, double Y, double W, double H)
+    {
+        public double Right => X + W;
+        public double Bottom => Y + H;
+        public bool Overlaps(Box b) => X < b.Right && b.X < Right && Y < b.Bottom && b.Y < Bottom;
+    }
+
+    private static Box Bounds(XDocument doc, XElement item)
+    {
+        var parent = Attr(item, "parent");
+        var origin = parent == "1" ? new Box(0, 0, 0, 0) : Bounds(doc, Cell(doc, parent));
+        var geo = item.Element("mxGeometry")!;
+        return new Box(origin.X + Value(geo, "x"), origin.Y + Value(geo, "y"), Value(geo, "width"), Value(geo, "height"));
+    }
+
     private static void CheckRoutesAndNodes(XDocument doc)
     {
-        var boxes = Boxes(doc);
-        foreach (var a in boxes)
-            foreach (var b in boxes.Where(b => string.CompareOrdinal(b.Key, a.Key) > 0))
-                Assert.False(a.Value.X < b.Value.X + b.Value.W && a.Value.X + a.Value.W > b.Value.X &&
-                    a.Value.Y < b.Value.Y + b.Value.H && a.Value.Y + a.Value.H > b.Value.Y, "Overlapping nodes");
-        foreach (var edge in doc.Descendants("mxCell").Where(c => (string?)c.Attribute("edge") == "1"))
+        var edges = Cells(doc, "edge", "1");
+        var vertices = Cells(doc, "vertex", "1").Where(cell => Attr(cell, "kind") != "component-icon").ToArray();
+        var boxes = vertices.ToDictionary(cell => Attr(cell, "id"), cell => Bounds(doc, cell));
+        var obstacles = vertices.Select(cell =>
         {
-            var styles = ((string)edge.Attribute("style")!).Split(';', StringSplitOptions.RemoveEmptyEntries).Select(p => p.Split('=', 2)).ToDictionary(p => p[0], p => p[1]);
+            var box = boxes[Attr(cell, "id")];
+            return Attr(cell, "kind") == "container" ?
+                box with { H = double.Parse(Style(cell)["height"], CultureInfo.InvariantCulture) } : box;
+        }).ToArray();
+        for (var i = 0; i < obstacles.Length; i++)
+            for (var j = i + 1; j < obstacles.Length; j++)
+                Assert.False(obstacles[i].Overlaps(obstacles[j]), "Overlapping nodes or headers");
+
+        var targets = edges.Select(edge => Attr(edge, "target")).ToHashSet(StringComparer.Ordinal);
+        var routingObstacles = obstacles.Concat(Cells(doc, "kind", "container")
+            .Select(frame => Attr(frame, "id")).Where(targets.Contains).Select(id => boxes[id])).ToArray();
+        foreach (var link in edges)
+        {
+            var styles = Style(link);
             double S(string key) => double.Parse(styles[key], CultureInfo.InvariantCulture);
-            var source = boxes[(string)edge.Attribute("source")!]; var target = boxes[(string)edge.Attribute("target")!];
+            var source = boxes[Attr(link, "source")];
+            var target = boxes[Attr(link, "target")];
+            var origin = boxes.GetValueOrDefault(Attr(link, "parent"), new Box(0, 0, 0, 0));
             var points = new List<(double X, double Y)> { (source.X + source.W * S("exitX"), source.Y + source.H * S("exitY")) };
-            points.AddRange(edge.Descendants("mxPoint").Select(p => (double.Parse((string)p.Attribute("x")!, CultureInfo.InvariantCulture), double.Parse((string)p.Attribute("y")!, CultureInfo.InvariantCulture))));
+            var waypoints = link.Element("mxGeometry")!.Element("Array")?.Elements("mxPoint") ?? [];
+            points.AddRange(waypoints.Select(p => (origin.X + Value(p, "x"), origin.Y + Value(p, "y"))));
             points.Add((target.X + target.W * S("entryX"), target.Y + target.H * S("entryY")));
             for (var i = 1; i < points.Count; i++)
             {
-                var a = points[i - 1]; var b = points[i];
-                Assert.True(a.X == b.X || Math.Abs(a.Y - b.Y) < .000001, "Non-orthogonal route");
-                foreach (var box in boxes.Values)
+                var a = points[i - 1];
+                var b = points[i];
+                const double margin = .00001;
+                var vertical = Math.Abs(a.X - b.X) < margin;
+                Assert.True(vertical || Math.Abs(a.Y - b.Y) < margin, "Non-orthogonal route");
+                foreach (var box in routingObstacles)
                 {
-                    var crosses = a.X == b.X
-                        ? a.X > box.X && a.X < box.X + box.W && Math.Max(a.Y, b.Y) > box.Y && Math.Min(a.Y, b.Y) < box.Y + box.H
-                        : a.Y > box.Y && a.Y < box.Y + box.H && Math.Max(a.X, b.X) > box.X && Math.Min(a.X, b.X) < box.X + box.W;
-                    Assert.False(crosses, "Edge crosses node interior");
+                    var crosses = vertical
+                        ? a.X > box.X + margin && a.X < box.Right - margin && Math.Max(a.Y, b.Y) > box.Y + margin && Math.Min(a.Y, b.Y) < box.Bottom - margin
+                        : a.Y > box.Y + margin && a.Y < box.Bottom - margin && Math.Max(a.X, b.X) > box.X + margin && Math.Min(a.X, b.X) < box.Right - margin;
+                    Assert.False(crosses, "Edge crosses a node, header or target frame");
                 }
             }
         }
     }
-    [Fact]
-    public void SelectedServicesStayInCenterWithClearStableRoutes()
-    {
-        var services = Services(12);
-        var edges = Enumerable.Range(0, 9).Select(i => Edge(services[i], "Next", services[i + 1])).ToList();
-        edges.Add(Edge(services[0], "Skip", services[6]));
-        edges.Add(Edge(services[0], "Shared")); edges.Add(Edge(services[8], "Shared"));
-        edges.Add(Edge(services[10], "Separate", services[11]));
-        var analysis = new NetworkAnalysis(services, new[] { "prod" }, edges, Array.Empty<string>());
-        var xml = NetworkMapGenerator.CreateDiagram(analysis);
-        var doc = XDocument.Parse(xml); var boxes = Boxes(doc);
-        Assert.Single(services.Select(s => boxes[s.Id].X).Distinct());
-        Assert.True(boxes.Single(b => !services.Any(s => s.Id == b.Key)).Value.X > boxes[services[0].Id].X);
-        CheckRoutesAndNodes(doc);
-        var reordered = new NetworkAnalysis(services.Reverse().ToArray(), analysis.Environments, edges.AsEnumerable().Reverse().ToArray(), analysis.Diagnostics);
-        Assert.Equal(xml, NetworkMapGenerator.CreateDiagram(reordered));
-    }
+
     [Theory]
     [InlineData("BASE_URL", false)]
-    [InlineData("SVC_PAYMENTS_API", true)]
-    public void TwoCallersReuseOneParameterBlock(string parameter, bool onLeft)
+    [InlineData("SVC_PAYMENTS_API_URL", true)]
+    public void SharedTargetHasAnIndependentArrowFromEachCaller(string parameter, bool onLeft)
     {
         var services = Services(2);
-        var edges = services.Select((s, i) => new NetworkConnection
-        {
-            Service = s, Path = "Backend.Url", Host = "{{ " + parameter + " }}", Port = (8000 + i).ToString(),
-            Choice = new NetworkChoice { Label = "Backend", Protocol = "HTTP" }
-        }).ToArray();
-        var analysis = new NetworkAnalysis(services, Array.Empty<string>(), edges, Array.Empty<string>());
+        var connections = services.Select((s, i) => Link(s, "Backend.Url", parameter, port: (8000 + i).ToString())).ToArray();
+        var display = new NetworkDisplayOptions();
+        var analysis = Analysis(services, connections) with { Display = display };
         var doc = XDocument.Parse(NetworkMapGenerator.CreateDiagram(analysis));
-        var boxes = Boxes(doc);
-        Assert.Equal(3, boxes.Count);
-        var links = doc.Descendants("mxCell").Where(c => (string?)c.Attribute("edge") == "1").ToArray();
-        Assert.Equal(2, links.Length);
-        var target = Assert.Single(links.Select(c => (string)c.Attribute("target")!).Distinct());
-        Assert.Equal(services.Select(s => s.Id).Order(), links.Select(c => (string)c.Attribute("source")!).Order());
-        Assert.All(services, s => Assert.True(onLeft ? boxes[target].X < boxes[s.Id].X : boxes[target].X > boxes[s.Id].X));
-        Assert.DoesNotContain("(+1)", (string)doc.Descendants("mxCell").Single(c => (string?)c.Attribute("id") == target).Attribute("value")!);
-        CheckRoutesAndNodes(doc);
-    }
-    [Fact]
-    public void SvcPrefixControlsDependencyColumnAndSelectedTargetsStayInCenter()
-    {
-        var services = Services(3);
-        services[1].AddressVariables = "SVC_SELECTED_API";
-        var edges = new[]
-        {
-            new NetworkConnection { Service = services[0], Path = "External.Url", Host = "https://{{ SVC_EXTERNAL_API }}/api",
-                Choice = new NetworkChoice { Label = "External" } },
-            new NetworkConnection { Service = services[1], Path = "Database.Host", Host = "{{ DATABASE_HOST }}",
-                Choice = new NetworkChoice { Label = "Database" } },
-            new NetworkConnection { Service = services[0], Path = "Selected.Url", Host = "{{ SVC_SELECTED_API }}",
-                Choice = new NetworkChoice { Label = "Selected", TargetService = services[1].Id } },
-            new NetworkConnection { Service = services[2], Path = "Other.Url", Host = "https://svc-literal.example.com",
-                Choice = new NetworkChoice { Label = "Literal" } }
-        };
-        var analysis = new NetworkAnalysis(services, Array.Empty<string>(), edges, Array.Empty<string>(),
-            new NetworkDisplayOptions { HideParameterNames = true });
-        var doc = XDocument.Parse(NetworkMapGenerator.CreateDiagram(analysis));
-        var boxes = Boxes(doc);
-        Assert.Equal(6, boxes.Count);
-        var center = boxes[services[0].Id].X;
-        Assert.All(services, s => Assert.Equal(center, boxes[s.Id].X));
-        var vertices = doc.Descendants("mxCell").Where(c => (string?)c.Attribute("vertex") == "1").ToArray();
-        string Id(string label) => (string)vertices.Single(v => (string?)v.Attribute("value") == label).Attribute("id")!;
-        Assert.True(boxes[Id("External")].X < center);
-        Assert.True(boxes[Id("Database")].X > center);
-        Assert.True(boxes[Id("Literal")].X > center);
-        CheckRoutesAndNodes(doc);
-    }
-    [Fact]
-    public void CyclesParallelEdgesAndSelfLoopsStayOutsideNodes()
-    {
-        var services = Services(4);
-        services[0].Label = new string('A', 180);
-        var edges = new[] { Edge(services[0], "B", services[1]), Edge(services[1], "A", services[0]),
-            Edge(services[0], "Self", services[0]), Edge(services[0], "B2", services[1]), Edge(services[1], "C", services[2]) };
-        var analysis = new NetworkAnalysis(services, Array.Empty<string>(), edges, Array.Empty<string>());
-        var doc = XDocument.Parse(NetworkMapGenerator.CreateDiagram(analysis));
-        CheckRoutesAndNodes(doc);
-        Assert.True(Boxes(doc)[services[0].Id].H > 110);
-        Assert.Equal(services.Length, Boxes(doc).Count);
-    }
 
-    [Fact]
-    public void DisplayFlagsChangeLabelsWithoutRemovingConnections()
-    {
-        var services = Services(1);
-        var edge = Edge(services[0], "GrpcClients.Payment.Host");
-        edge.Choice.Label = "Payment API";
-        edge.Choice.Protocol = "Unknown";
-        var display = new NetworkDisplayOptions { HideUnknownProtocols = true, HideParameterNames = true, ShowConfigurationKeys = false };
-        var analysis = new NetworkAnalysis(services, Array.Empty<string>(), new[] { edge }, Array.Empty<string>(), display);
-        var doc = XDocument.Parse(NetworkMapGenerator.CreateDiagram(analysis));
-        Assert.Single(doc.Descendants("mxCell").Where(c => (string?)c.Attribute("edge") == "1"));
-        Assert.Contains(doc.Descendants("mxCell"), c => (string?)c.Attribute("value") == "Payment API");
-        Assert.Equal("", (string?)doc.Descendants("mxCell").Single(c => (string?)c.Attribute("edge") == "1").Attribute("value"));
+        Assert.Equal(3, Cells(doc, "kind", "node").Length);
+        var frame = Assert.Single(Cells(doc, "kind", "container"));
+        Assert.Equal("k8s", Attr(frame, "value"));
+        Assert.Empty(Cells(doc, "kind", "junction"));
+        var target = Assert.Single(Cells(doc, "value", "Backend"));
+        var arrows = Cells(doc, "target", Attr(target, "id"));
+        Assert.Equal(services.Select(s => s.Id).Order(), arrows.Select(c => Attr(c, "source")).Order());
+        Assert.All(arrows, c => Assert.Equal("block", Style(c)["endArrow"]));
+        Assert.Equal(new[] { "8000 (HTTPS)", "8001 (HTTPS)" }, arrows.Select(c => Attr(c, "value")).Order());
+        Assert.Equal(2, arrows.Select(c => Style(c)["strokeColor"]).Distinct().Count());
+        var remainingColor = Style(arrows.Single(c => Attr(c, "source") == services[1].Id))["strokeColor"];
+        Assert.All(services, service =>
+        {
+            var sx = Bounds(doc, Cell(doc, service.Id)).X;
+            var tx = Bounds(doc, target).X;
+            Assert.True(onLeft ? tx < sx : tx > sx);
+        });
+        CheckRoutesAndNodes(doc);
 
-        display.ShowConfigurationKeys = true;
-        display.HideUnknownProtocols = false;
-        display.HideParameterNames = false;
+        display.ColorArrowsByService = false;
+        var grayArrows = Cells(XDocument.Parse(NetworkMapGenerator.CreateDiagram(analysis)), "edge", "1");
+        Assert.Equal(2, grayArrows.Length);
+        Assert.All(grayArrows, c => Assert.Equal("#666666", Style(c)["strokeColor"]));
+        display.ColorArrowsByService = true;
+
+        connections[0].Choice.Include = false;
         doc = XDocument.Parse(NetworkMapGenerator.CreateDiagram(analysis));
-        var caption = (string)doc.Descendants("mxCell").Single(c => (string?)c.Attribute("edge") == "1").Attribute("value")!;
-        Assert.Contains("GrpcClients.Payment.Host", caption);
-        Assert.Contains("Unknown", caption);
-        Assert.Contains(doc.Descendants("mxCell"), c => ((string?)c.Attribute("value"))?.Contains("SHARED_HOST") == true);
+        Assert.Empty(Cells(doc, "kind", "junction"));
+        var direct = Assert.Single(Cells(doc, "edge", "1"));
+        Assert.Equal(services[1].Id, Attr(direct, "source"));
+        Assert.Equal(Attr(target, "id"), Attr(direct, "target"));
+        Assert.Equal(remainingColor, Style(direct)["strokeColor"]);
+    }
+
+    [Theory]
+    [InlineData("SVC_KAFKA_HOST", "", 1d)]
+    [InlineData("KAFKA_HOST", "", 0d)]
+    [InlineData("KAFKA_HOST", "k8s", 0d)]
+    [InlineData("SVC_KAFKA_HOST", "Region", 1d)]
+    public void SingleIntegrationFrameAcceptsAnArrowFromEachCaller(string parameter, string parentBlock, double entryX)
+    {
+        var services = Services(2);
+        var connections = services.Select((service, i) => Link(service, "Kafka.Host", parameter, "Топики Kafka",
+            block: "Kafka", port: (9092 + i).ToString())).ToArray();
+        foreach (var connection in connections) connection.ExternalTarget.ParentBlock = parentBlock;
+        var doc = XDocument.Parse(NetworkMapGenerator.CreateDiagram(Analysis(services, connections)));
+        var frame = Assert.Single(Cells(doc, "value", "Kafka"));
+        var node = Assert.Single(Cells(doc, "value", "Топики Kafka"));
+        var frameId = Attr(frame, "id");
+        Assert.Equal(frameId, Attr(node, "parent"));
+        var frameBounds = Bounds(doc, frame);
+        var nodeBounds = Bounds(doc, node);
+        var arrows = Cells(doc, "edge", "1");
+        Assert.Equal(services.Select(service => service.Id).Order(), arrows.Select(edge => Attr(edge, "source")).Order());
+        var edgeParent = parentBlock == "k8s" ? Attr(frame, "parent") : "1";
+        Assert.All(arrows, edge =>
+        {
+            Assert.Equal(frameId, Attr(edge, "target"));
+            Assert.Equal(edgeParent, Attr(edge, "parent"));
+            var style = Style(edge);
+            Assert.Equal(entryX, double.Parse(style["entryX"], CultureInfo.InvariantCulture));
+            var y = frameBounds.Y + frameBounds.H * double.Parse(style["entryY"], CultureInfo.InvariantCulture);
+            Assert.InRange(y, nodeBounds.Y, nodeBounds.Bottom);
+        });
+        Assert.Equal(2, arrows.Select(edge => Style(edge)["entryY"]).Distinct().Count());
+        CheckRoutesAndNodes(doc);
+    }
+
+    [Fact]
+    public void OrderedIntegrationsUseNonCrossingLanesOnBothSides()
+    {
+        var services = Services(14);
+        var connections = services.SelectMany((service, index) => new[]
+        {
+            Link(service, "Identity.Url", $"SVC_{index}_URL", $"Identity {services.Length - index}"),
+            Link(service, "Storage.Host", $"STORAGE_{index}_HOST", $"Storage {services.Length - index}")
+        }).ToArray();
+        var doc = XDocument.Parse(NetworkMapGenerator.CreateDiagram(Analysis(services, connections)));
+        var sourceColors = Cells(doc, "edge", "1").GroupBy(edge => Attr(edge, "source"))
+            .Select(group => Assert.Single(group.Select(edge => Style(edge)["strokeColor"]).Distinct())).ToArray();
+        Assert.Equal(services.Length, sourceColors.Distinct().Count());
+
+        var bottomOfServices = services.Max(service => Bounds(doc, Cell(doc, service.Id)).Bottom);
+        foreach (var path in new[] { "Identity.Url", "Storage.Host" })
+        {
+            var left = path == "Identity.Url";
+            double previousTargetY = bottomOfServices;
+            double previousOffset = double.PositiveInfinity;
+            foreach (var service in services.OrderBy(service => Bounds(doc, Cell(doc, service.Id)).Y))
+            {
+                var edge = Assert.Single(Cells(doc, "source", service.Id).Where(cell => Attr(cell, "sourcePath") == path));
+                var source = Bounds(doc, Cell(doc, service.Id));
+                var target = Bounds(doc, Cell(doc, Attr(edge, "target")));
+                Assert.True(target.Y > previousTargetY);
+                var parent = Bounds(doc, Cell(doc, Attr(edge, "parent")));
+                var bends = edge.Element("mxGeometry")!.Element("Array")!.Elements("mxPoint").ToArray();
+                Assert.Equal(2, bends.Length);
+                var lane = parent.X + Value(bends[0], "x");
+                Assert.Equal(Value(bends[0], "x"), Value(bends[1], "x"));
+                Assert.True(Value(bends[0], "y") < Value(bends[1], "y"));
+                Assert.True(left ? lane > target.Right && lane < source.X : lane > source.Right && lane < target.X);
+                var offset = left ? source.X - lane : lane - source.Right;
+                // With both endpoints in the same vertical order, outer lanes for the upper exits prevent crossings.
+                Assert.True(offset < previousOffset);
+                if (double.IsFinite(previousOffset)) Assert.Equal(14, previousOffset - offset);
+                previousTargetY = target.Y;
+                previousOffset = offset;
+            }
+        }
+        CheckRoutesAndNodes(doc);
+    }
+
+    [Fact]
+    public void NamedContainersAreGlobalAndRoutesAcrossTheirHeadersStayClear()
+    {
+        var s = Services(4);
+        s[1].Block = " K8S ";
+        s[2].Block = "k8s-2";
+        s[3].Block = "";
+        var connections = new[]
+        {
+            Link(s[0], "External.Url", "SVC_EXTERNAL_API_URL", "External"),
+            Link(s[3], "External.Url", "SVC_EXTERNAL_API_URL", "External"),
+            Link(s[1], "Database.Host", "DATABASE_HOST", "Database"),
+            Link(s[2], "Cache.Host", "CACHE_HOST", "Cache", block: "k8s-2"),
+            Link(s[3], "Queue.Host", "QUEUE_HOST", "Queue", block: "aaa"),
+            Link(s[0], "Self", target:s[0]),
+            Link(s[0], "B", target:s[1]),
+            Link(s[0], "B2", target:s[1]),
+            Link(s[1], "C", target:s[2]),
+            Link(s[2], "A", target:s[0])
+        };
+        var analysis = Analysis(s, connections);
+        var xml = NetworkMapGenerator.CreateDiagram(analysis);
+        var doc = XDocument.Parse(xml);
+        var frames = Cells(doc, "kind", "container");
+        Assert.Equal(3, frames.Length);
+        var k8s = frames.Single(c => Attr(c, "value").Equals("k8s", StringComparison.OrdinalIgnoreCase));
+        var other = frames.Single(c => Attr(c, "value") == "k8s-2");
+        Assert.False(Bounds(doc, k8s).Overlaps(Bounds(doc, other)));
+
+        foreach (var node in new[] { Cell(doc, s[0].Id), Cell(doc, s[1].Id), Cells(doc, "value", "External").Single(), Cells(doc, "value", "Database").Single() })
+            Assert.Equal(Attr(k8s, "id"), Attr(node, "parent"));
+        Assert.Equal(Attr(other, "id"), Attr(Cell(doc, s[2].Id), "parent"));
+        Assert.Equal("1", Attr(Cell(doc, s[3].Id), "parent"));
+        var queueContainer = frames.Single(c => Attr(c, "value") == "aaa");
+        Assert.True(Bounds(doc, queueContainer).Y > Bounds(doc, other).Bottom);
+
+        var center = Bounds(doc, Cell(doc, s[0].Id)).X;
+        Assert.True(Bounds(doc, Cells(doc, "value", "External").Single()).X < center);
+        Assert.True(Bounds(doc, Cells(doc, "value", "Database").Single()).X > center);
+        Assert.Single(Cells(doc, "source", s[0].Id).Where(edge => Attr(edge, "target") == s[1].Id));
+        CheckRoutesAndNodes(doc);
+        var reordered = analysis with { Services = s.Reverse().ToArray(), Connections = connections.Reverse().ToArray() };
+        Assert.Equal(xml, NetworkMapGenerator.CreateDiagram(reordered));
+    }
+
+    [Fact]
+    public void BlocksAdvanceOnlyTheColumnsTheyOccupy()
+    {
+        var service = Assert.Single(Services(1));
+        var database = Link(service, "Database.Host", "DB_HOST", "DB", block: "db");
+        var wso = Link(service, "Wso.Host", "WSO_HOST", "WSO PCR", block: "WSO PCR");
+        var windows = Link(service, "Signing.Host", "SVC_SIGNING_HOST", new string('X', 420), block: "windows server");
+        var analysis = Analysis([service], database, wso, windows);
+        var doc = XDocument.Parse(NetworkMapGenerator.CreateDiagram(analysis));
+        Box Frame(XDocument drawing, string label) => Bounds(drawing, Assert.Single(Cells(drawing, "kind", "container").Where(c => Attr(c, "value") == label)));
+
+        var databaseFrame = Frame(doc, "db");
+        var wsoFrame = Frame(doc, "WSO PCR");
+        var windowsFrame = Frame(doc, "windows server");
+        Assert.Equal(Frame(doc, "k8s").Y, databaseFrame.Y);
+        Assert.Equal(databaseFrame.Y, windowsFrame.Y);
+        Assert.True(wsoFrame.Y > databaseFrame.Bottom);
+        Assert.True(wsoFrame.Y < windowsFrame.Bottom);
+        CheckRoutesAndNodes(doc);
+
+        windows.Choice.Include = false;
+        var withoutWindows = XDocument.Parse(NetworkMapGenerator.CreateDiagram(analysis));
+        Assert.Equal(wsoFrame.Y, Frame(withoutWindows, "WSO PCR").Y);
+        Assert.Equal(databaseFrame.Y, Frame(withoutWindows, "db").Y);
+    }
+
+    [Fact]
+    public void NestedFramesInDifferentColumnsCanStartAtTheSameHeight()
+    {
+        var service = Assert.Single(Services(1));
+        service.Block = "Services";
+        service.ParentBlock = "Region";
+        var database = Link(service, "Database.Host", "DB_HOST", "DB", block: "Databases");
+        database.ExternalTarget.ParentBlock = "Region";
+        var other = Link(service, "Queue.Host", "QUEUE_HOST", "Queue", block: "Queues");
+        other.ExternalTarget.ParentBlock = "Other Region";
+        var doc = XDocument.Parse(NetworkMapGenerator.CreateDiagram(Analysis([service], database, other)));
+        Box Frame(string label) => Bounds(doc, Assert.Single(Cells(doc, "value", label)));
+        var services = Frame("Services");
+        var databases = Frame("Databases");
+        var region = Frame("Region");
+        var otherRegion = Frame("Other Region");
+
+        Assert.Equal(services.Y, databases.Y);
+        Assert.False(services.Overlaps(databases));
+        Assert.True(otherRegion.Y > region.Bottom);
+        CheckRoutesAndNodes(doc);
+
+        database.ExternalTarget.ParentBlock = "Other Region";
+        doc = XDocument.Parse(NetworkMapGenerator.CreateDiagram(Analysis([service], database, other)));
+        region = Frame("Region");
+        otherRegion = Frame("Other Region");
+        Assert.Equal(region.Y, otherRegion.Y);
+        Assert.False(region.Overlaps(otherRegion));
+        CheckRoutesAndNodes(doc);
+    }
+
+    [Fact]
+    public void ChildBlocksKeepTheirNodesAndUseTheClosestCommonContainerForArrows()
+    {
+        var s = Services(6);
+        s[0].Block = s[1].Block = s[5].Block = "";
+        s[0].ParentBlock = s[1].ParentBlock = "k8s";
+        s[2].Block = "Kafka";
+        s[2].ParentBlock = " k8s ";
+        s[3].Block = " KAFKA ";
+        s[4].Block = "Cache";
+        s[4].ParentBlock = "k8s";
+
+        var links = new[]
+        {
+            Link(s[0], "ToKafka", target: s[2]), Link(s[2], "InsideKafka", target: s[3]),
+            Link(s[3], "ToCache", target: s[4]), Link(s[4], "OutsideK8s", target: s[5]),
+            Link(s[5], "BackToK8s", target: s[1])
+        };
+        var analysis = Analysis(s, links);
+        var xml = NetworkMapGenerator.CreateDiagram(analysis);
+        var doc = XDocument.Parse(xml);
+        var frames = Cells(doc, "kind", "container");
+        Assert.Equal(3, frames.Length);
+        var k8s = frames.Single(c => Attr(c, "value") == "k8s");
+        var kafka = frames.Single(c => Attr(c, "value").Equals("Kafka", StringComparison.OrdinalIgnoreCase));
+        var cache = frames.Single(c => Attr(c, "value") == "Cache");
+        Assert.Equal("1", Attr(k8s, "parent"));
+        var outer = Bounds(doc, k8s);
+        foreach (var child in new[] { Cell(doc, s[0].Id), Cell(doc, s[1].Id), kafka, cache })
+        {
+            Assert.Equal(Attr(k8s, "id"), Attr(child, "parent"));
+            var bounds = Bounds(doc, child);
+            Assert.True(outer.X < bounds.X && bounds.Right < outer.Right);
+            Assert.True(outer.Y + 44 < bounds.Y && bounds.Bottom < outer.Bottom);
+        }
+        Assert.False(Bounds(doc, kafka).Overlaps(Bounds(doc, cache)));
+        Assert.Equal(Attr(kafka, "id"), Attr(Cell(doc, s[2].Id), "parent"));
+        Assert.Equal(Attr(kafka, "id"), Attr(Cell(doc, s[3].Id), "parent"));
+        Assert.Equal(Attr(cache, "id"), Attr(Cell(doc, s[4].Id), "parent"));
+        Assert.Equal("1", Attr(Cell(doc, s[5].Id), "parent"));
+        string EdgeParent(string path) => Attr(Assert.Single(Cells(doc, "sourcePath", path)), "parent");
+        Assert.Equal(Attr(kafka, "id"), EdgeParent("InsideKafka"));
+        Assert.Equal(Attr(k8s, "id"), EdgeParent("ToKafka"));
+        Assert.Equal(Attr(k8s, "id"), EdgeParent("ToCache"));
+        Assert.Equal(s[4].Id, Attr(Assert.Single(Cells(doc, "sourcePath", "ToCache")), "target"));
+        Assert.Equal("1", EdgeParent("OutsideK8s"));
+        CheckRoutesAndNodes(doc);
+        Assert.Equal(xml, NetworkMapGenerator.CreateDiagram(Analysis(s.Reverse().ToArray(), links.Reverse().ToArray())));
+    }
+
+    [Fact]
+    public void ExcludingAConnectionKeepsItsSharedBlockParentWithoutItsNode()
+    {
+        var s = Assert.Single(Services(1));
+        s.Block = "Kafka";
+        var connection = Link(s, "Hidden.Host", block: "kafka");
+        connection.ExternalTarget.ParentBlock = "k8s";
+        connection.Choice.Include = false;
+
+        var doc = XDocument.Parse(NetworkMapGenerator.CreateDiagram(Analysis([s], connection)));
+        var outer = Assert.Single(Cells(doc, "value", "k8s"));
+        var inner = Assert.Single(Cells(doc, "value", "Kafka"));
+        Assert.Equal(Attr(outer, "id"), Attr(inner, "parent"));
+        Assert.Equal(s.Id, Attr(Assert.Single(Cells(doc, "kind", "node")), "id"));
+        Assert.Empty(Cells(doc, "edge", "1"));
+    }
+
+    [Theory]
+    [InlineData("A", " a ", "B", "", "собственным", "A")]
+    [InlineData("A", "B", " a ", "C", "разные родители", "B", "C")]
+    [InlineData("A", "B", "B", "A", "цикл", "A", "B")]
+    [InlineData("A", "B", "B", "C", "два уровня", "A", "B", "C")]
+    public void InvalidHierarchyIsReportedByBothExports(string block, string parent, string otherBlock, string otherParent,
+        string problem, params string[] names)
+    {
+        var s = Services(2);
+        (s[0].Block, s[0].ParentBlock) = (block, parent);
+        (s[1].Block, s[1].ParentBlock) = (otherBlock, otherParent);
+        var analysis = Analysis(s);
+        var diagram = Assert.Throws<InvalidDataException>(() => NetworkMapGenerator.CreateDiagram(analysis));
+        var page = Assert.Throws<InvalidDataException>(() => NetworkMapGenerator.Render(NetworkPageTemplates.BasicHtml, null, analysis));
+        Assert.Equal(diagram.Message, page.Message);
+        Assert.Contains(problem, diagram.Message);
+        Assert.All(names, name => Assert.Contains(name, diagram.Message, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void OptionalCaptionsAppearOnDirectArrowsAndLongNodeNamesStayIntact()
+    {
+        var services = Services(2);
+        var title = new string('A', 160);
+        var a = Link(services[0], "GrpcClients.Payment.Host", name: title, port: "5432");
+        var b = Link(services[1], "Payment.Url", name: title, port: "443");
+        a.Choice.Protocol = "Unknown";
+        var display = new NetworkDisplayOptions();
+        var analysis = Analysis(services, a, b) with { Display = display };
+        var doc = XDocument.Parse(NetworkMapGenerator.CreateDiagram(analysis));
+        var node = Assert.Single(Cells(doc, "value", title));
+        Assert.True(Bounds(doc, node).H > 110);
+        Assert.Equal("5432", Attr(Assert.Single(Cells(doc, "source", a.Service.Id)), "value"));
+        Assert.Equal("443 (HTTPS)", Attr(Assert.Single(Cells(doc, "source", b.Service.Id)), "value"));
+        display.ShowConfigurationKeys = display.HideProtocolsOnArrows = true;
+        doc = XDocument.Parse(NetworkMapGenerator.CreateDiagram(analysis));
+        Assert.Equal("5432\n" + a.Path, Attr(Assert.Single(Cells(doc, "source", a.Service.Id)), "value"));
+        Assert.Equal("443\n" + b.Path, Attr(Assert.Single(Cells(doc, "source", b.Service.Id)), "value"));
+        Assert.Equal(2, Cells(doc, "target", Attr(node, "id")).Length);
+        CheckRoutesAndNodes(doc);
     }
 }

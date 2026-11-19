@@ -56,8 +56,18 @@ internal sealed class LocalSettings
 
     public void Save()
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
-        File.WriteAllText(FilePath, JsonSerializer.Serialize(this, JsonOptions));
+        var path = FilePath;
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var pending = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            File.WriteAllText(pending, JsonSerializer.Serialize(this, JsonOptions));
+            File.Move(pending, path, overwrite: true);
+        }
+        finally
+        {
+            File.Delete(pending);
+        }
     }
 }
 

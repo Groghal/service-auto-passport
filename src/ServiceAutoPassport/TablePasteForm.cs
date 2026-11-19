@@ -1,10 +1,9 @@
 using System.Drawing;
 using System.Windows.Forms;
-using ServiceAutoPassport.Core;
 
 namespace ServiceAutoPassport;
 
-internal sealed class KeyDescriptionsPasteForm : Form
+internal sealed class TablePasteForm<T> : Form where T : class
 {
     private readonly TextBox _input = new()
     {
@@ -17,24 +16,23 @@ internal sealed class KeyDescriptionsPasteForm : Form
         Font = new Font("Consolas", 10F)
     };
 
-    public IReadOnlyDictionary<string, string> Descriptions { get; private set; } =
-        new Dictionary<string, string>(StringComparer.Ordinal);
+    public T? Result { get; private set; }
 
-    public KeyDescriptionsPasteForm()
+    public TablePasteForm(string title, string hint, string buttonText, Func<string, T> parse)
     {
-        Text = "Вставить описания из Excel";
+        Text = title;
         Font = new Font("Segoe UI", 9F);
         StartPosition = FormStartPosition.CenterParent;
         MinimumSize = new Size(560, 320);
         ClientSize = new Size(720, 430);
         ShowInTaskbar = false;
 
-        var import = new Button { Text = "Добавить пары", AutoSize = true };
+        var import = new Button { Text = buttonText, AutoSize = true };
         import.Click += (_, _) =>
         {
             try
             {
-                Descriptions = KeyDescriptionImport.Parse(_input.Text);
+                Result = parse(_input.Text);
                 DialogResult = DialogResult.OK;
                 Close();
             }
@@ -62,15 +60,14 @@ internal sealed class KeyDescriptionsPasteForm : Form
             RowCount = 3,
             Padding = new Padding(12)
         };
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 60));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
         layout.Controls.Add(new Label
         {
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleLeft,
-            Text = "Скопируйте в Excel две колонки: ключ и описание. Вставьте их сюда (Ctrl+V). " +
-                   "Между ключом и описанием можно поставить табуляцию или пробел."
+            Text = hint
         }, 0, 0);
         layout.Controls.Add(_input, 0, 1);
         layout.Controls.Add(actions, 0, 2);

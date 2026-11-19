@@ -111,11 +111,14 @@ internal sealed class KeyDescriptionsForm : Form
 
     private void ImportDescriptions()
     {
-        using var dialog = new KeyDescriptionsPasteForm();
+        using var dialog = new TablePasteForm<IReadOnlyDictionary<string, string>>("Вставить описания из Excel",
+            "Скопируйте в Excel ключ и описание и вставьте их сюда (Ctrl+V). " +
+            "Между ключом и описанием можно поставить табуляцию или пробел.",
+            "Добавить пары", KeyDescriptionImport.Parse);
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
         _grid.EndEdit();
-        var imported = dialog.Descriptions.Select(pair =>
+        var imported = dialog.Result!.Select(pair =>
             (pair.Key, pair.Value, IsHtml: DescriptionHtml.LooksLikeMarkup(pair.Value))).ToArray();
         try
         {
@@ -145,7 +148,7 @@ internal sealed class KeyDescriptionsForm : Form
             }
         }
 
-        _hint.Text = $"Добавлено: {dialog.Descriptions.Count - updated}. Обновлено: {updated}. " +
+        _hint.Text = $"Добавлено: {imported.Length - updated}. Обновлено: {updated}. " +
                      "Нажмите «Сохранить», чтобы записать настройки.";
     }
 
