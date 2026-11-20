@@ -397,7 +397,7 @@ public sealed class NetworkLayoutTests
         (s[1].Block, s[1].ParentBlock) = (otherBlock, otherParent);
         var analysis = Analysis(s);
         var diagram = Assert.Throws<InvalidDataException>(() => NetworkMapGenerator.CreateDiagram(analysis));
-        var page = Assert.Throws<InvalidDataException>(() => NetworkMapGenerator.Render(NetworkPageTemplates.BasicHtml, null, analysis));
+        var page = Assert.Throws<InvalidDataException>(() => NetworkMapGenerator.RenderTable(NetworkTableTemplates.BasicHtml, analysis));
         Assert.Equal(diagram.Message, page.Message);
         Assert.Contains(problem, diagram.Message);
         Assert.All(names, name => Assert.Contains(name, diagram.Message, StringComparison.OrdinalIgnoreCase));

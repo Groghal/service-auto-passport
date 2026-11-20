@@ -26,8 +26,11 @@ public static class ClipboardTemplateProbe
         var document = new HtmlDocument();
         document.LoadHtml(fragment);
         var text = Regex.Replace(HtmlEntity.DeEntitize(document.DocumentNode.InnerText), @"\s+", " ");
-        if (includeNetwork && document.DocumentNode.Descendants().Any(n => n.GetAttributeValue("data-macro-name", "") == "drawio") &&
-            document.DocumentNode.Descendants().Any(NetworkTableTransformer.IsMacro)) return true;
+        if (includeNetwork)
+        {
+            try { NetworkTableTransformer.Find(document); return true; }
+            catch (InvalidDataException) { }
+        }
         return HasAll(text, "Название сервиса", "Namespace в K8S") ||
                HasAll(text, "Переменная адреса компонента в app-params", "Комментарии") ||
                HasAll(text, "Объект доступа", "Переменная адреса в app-params") ||

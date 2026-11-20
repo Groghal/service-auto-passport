@@ -33,9 +33,29 @@ public static partial class J2Variables
         return null;
     }
 
+    internal static string Expand(string expression, IReadOnlyDictionary<string, string?> values, Func<string, string>? normalize = null)
+    {
+        var stack = new HashSet<string>(StringComparer.Ordinal);
+        return Resolve(expression);
+
+        string Resolve(string text)
+        {
+            if (stack.Count > 128) throw new InvalidDataException("слишком глубокая цепочка ссылок");
+            return PlaceholderRegex().Replace(text, match =>
+            {
+                var key = match.Groups[1].Value;
+                if (!stack.Add(key)) throw new InvalidDataException("циклическая ссылка: " + key);
+                if (!values.TryGetValue(key, out var value) || value is null) throw new InvalidDataException("не найдено: " + key);
+                var result = Resolve(normalize is null ? value : normalize(value));
+                stack.Remove(key);
+                return result;
+            });
+        }
+    }
+
     [GeneratedRegex(@"^(?<quote>['""]?)[ \t]*\{\{\s*(?<variable>[A-Za-z_][A-Za-z0-9_]*)\s*\}\}[ \t]*\k<quote>[ \t]*(?:#[^\r\n]*)?$")]
     private static partial Regex SinglePlaceholderRegex();
 
     [GeneratedRegex(@"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")]
-    private static partial Regex PlaceholderRegex();
+    internal static partial Regex PlaceholderRegex();
 }

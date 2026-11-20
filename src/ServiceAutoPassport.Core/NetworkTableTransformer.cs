@@ -8,6 +8,7 @@ namespace ServiceAutoPassport.Core;
 internal static class NetworkTableTransformer
 {
     private const string MacroName = "table-joiner";
+    private const string ExpectedMacro = "Нужен один макрос Table Transformer с исходной таблицей, скопированный из редактора Confluence.";
     private const string ParametersAttribute = "data-macro-parameters";
     internal const string FirstColumn = "Элемент";
     internal const string ParametersColumn = "Параметры";
@@ -17,13 +18,21 @@ internal static class NetworkTableTransformer
     internal const string NodeLabelColumn = "Подпись узла";
     private static readonly Regex Parameter = new(@"(?:^|\|)(?<name>[^=|]+)=(?<value>(?:\\.|[^\\|])*)");
 
-    public static bool IsMacro(HtmlNode node) => node.GetAttributeValue("data-macro-name", "") == MacroName;
+    private static bool IsMacro(HtmlNode node) => node.GetAttributeValue("data-macro-name", "") == MacroName;
+
+    public static (HtmlNode Macro, HtmlNode Table) Find(string html)
+    {
+        if (string.IsNullOrWhiteSpace(html)) throw new InvalidDataException(ExpectedMacro);
+        var document = new HtmlDocument();
+        document.LoadHtml(CfHtml.ExtractFragment(html));
+        return Find(document);
+    }
 
     public static (HtmlNode Macro, HtmlNode Table) Find(HtmlDocument document)
     {
         var macros = document.DocumentNode.Descendants().Where(IsMacro).ToArray();
         if (macros.Length != 1 || macros[0].Name != "table" || macros[0].GetAttributeValue("data-macro-body-type", "") != "RICH_TEXT")
-            throw new InvalidDataException("Нужен один макрос Table Transformer с исходной таблицей, скопированный из редактора Confluence.");
+            throw new InvalidDataException(ExpectedMacro);
 
         var macro = macros[0];
         var tables = macro.Descendants("table").Where(table =>
@@ -33,10 +42,10 @@ internal static class NetworkTableTransformer
             throw new InvalidDataException("Внутри Table Transformer должна быть одна исходная таблица.");
     }
 
-    public static void Fill(HtmlDocument document, IReadOnlyList<string> environments, IEnumerable<NetworkTarget> targets,
+    public static void Fill((HtmlNode Macro, HtmlNode Table) template, IReadOnlyList<string> environments, IEnumerable<NetworkTarget> targets,
         IReadOnlyDictionary<string, string> blockParents, IReadOnlySet<string> sharedContainers)
     {
-        var (macro, table) = Find(document);
+        var (macro, table) = template;
         var visible = new[] { FirstColumn }.Concat(environments).ToArray();
         var columns = visible.Concat(new[] { ParametersColumn, "Сервисы", "Подключение", AddressColumn, BlockColumn, ParentBlockColumn, NodeLabelColumn });
         var html = new StringBuilder("<tbody><tr>");

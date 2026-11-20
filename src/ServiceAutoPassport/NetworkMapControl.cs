@@ -8,10 +8,10 @@ internal sealed class NetworkMapControl : UserControl
     private readonly LocalSettings _settings;
     private readonly TextBox _appParamsRoot = new() { Dock = DockStyle.Fill };
     private readonly Label _clipboardIndicator = new() { Dock = DockStyle.Fill, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft, BorderStyle = BorderStyle.FixedSingle };
-    private readonly Button _analyze = new() { Text = "Анализировать (базовый шаблон)", AutoSize = true };
-    private readonly Button _analyzeSaved = new() { Text = "Анализ: сохранённый шаблон + буфер", AutoSize = true };
+    private readonly Button _analyze = new() { Text = "Анализ: базовая таблица", AutoSize = true };
+    private readonly Button _analyzeSaved = new() { Text = "Анализ: сохранённая таблица", AutoSize = true };
     private string? _template;
-    private string? _clipboard;
+    private string? _prefillClipboardTemplate;
     private string Root => _appParamsRoot.Text.Trim();
     public Button AnalyzeButton => _analyze;
     private readonly BindingList<NetworkServiceInput> _services;
@@ -20,7 +20,7 @@ internal sealed class NetworkMapControl : UserControl
     private readonly TextBox _environments = new() { Dock = DockStyle.Fill };
     private readonly TextBox _ports = new() { Dock = DockStyle.Fill, Multiline = true, AcceptsReturn = true, ScrollBars = ScrollBars.Vertical };
     private readonly TextBox _diagnostics = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical };
-    private readonly Button _copyPage = new() { Text = "Копировать страницу", AutoSize = true, Enabled = false };
+    private readonly Button _copyTable = new() { Text = "Копировать таблицу", AutoSize = true, Enabled = false };
     private readonly Button _copyXml = new() { Text = "Копировать draw.io XML", AutoSize = true, Enabled = false };
     private NetworkAnalysis? _analysis;
     private bool _binding;
@@ -59,18 +59,21 @@ internal sealed class NetworkMapControl : UserControl
         add.Click += (_, _) => Run(AddFiles);
         var remove = new Button { Text = "Удалить сервис", AutoSize = true };
         remove.Click += (_, _) => { if (_inputs.CurrentRow?.DataBoundItem is NetworkServiceInput s) _services.Remove(s); InvalidateAnalysis(); };
-        var saveTemplate = new Button { Text = "Сохранить сетевой шаблон из буфера", AutoSize = true };
+        var saveTemplate = new Button { Text = "Сохранить шаблон таблицы из буфера", AutoSize = true };
         saveTemplate.Click += (_, _) => Run(() =>
         {
-            var html = WindowsClipboard.ReadHtml();
-            NetworkMapGenerator.ValidateTemplate(html);
-            _settings.Network.TemplateHtml = html;
+            _settings.Network.TemplateHtml = NetworkMapGenerator.ExtractTableTemplate(WindowsClipboard.ReadHtml());
             _settings.Save();
             InvalidateAnalysis();
             _analyzeSaved.Enabled = true;
-            _diagnostics.Text = "Сетевой шаблон сохранён.";
+            _diagnostics.Text = "Шаблон таблицы сохранён.";
         });
-        actions.Controls.AddRange(new Control[] { add, remove, saveTemplate }); layout.Controls.Add(actions, 0, 3);
+        var kafkaTopics = new Button { Text = "Топики Kafka", AutoSize = true };
+        kafkaTopics.Click += (_, _) => Run(CopyKafkaTopics);
+        var kafkaRules = new Button { Text = "Правила топиков…", AutoSize = true };
+        kafkaRules.Click += (_, _) => Run(EditKafkaTopicRules);
+        actions.Controls.AddRange(new Control[] { add, remove, saveTemplate, kafkaTopics, kafkaRules });
+        layout.Controls.Add(actions, 0, 3);
         foreach (var item in new[] { ("J2File", "Main J2"), ("Label", "Название"), ("YamlService", "YAML-папка"), ("AddressVariables", "Собственные адресные переменные") })
             _inputs.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = item.Item1, HeaderText = item.Item2 });
         _inputs.Columns.Add(BlockColumn(nameof(NetworkServiceInput.Block)));
@@ -100,13 +103,13 @@ internal sealed class NetworkMapControl : UserControl
         layout.Controls.Add(displayOptions, 0, 7);
         var generate = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true };
         _analyze.Click += (_, _) => Run(() => Analyze(TemplateSource.Basic));
-        var analyzeClipboard = new Button { Text = "Анализ: шаблон из буфера", AutoSize = true };
+        var analyzeClipboard = new Button { Text = "Анализ: таблица из буфера", AutoSize = true };
         analyzeClipboard.Click += (_, _) => Run(() => Analyze(TemplateSource.Clipboard));
         _analyzeSaved.Click += (_, _) => Run(() => Analyze(TemplateSource.Saved));
         _analyzeSaved.Enabled = !string.IsNullOrWhiteSpace(settings.Network.TemplateHtml);
         var parameters = new Button { Text = "Параметры сети…", AutoSize = true };
         parameters.Click += (_, _) => EditNetworkParameters();
-        generate.Controls.AddRange(new Control[] { _analyze, analyzeClipboard, _analyzeSaved, parameters, _copyPage, _copyXml }); layout.Controls.Add(generate, 0, 8);
+        generate.Controls.AddRange(new Control[] { _analyze, analyzeClipboard, _analyzeSaved, parameters, _copyTable, _copyXml }); layout.Controls.Add(generate, 0, 8);
         layout.Controls.Add(_review, 0, 9); layout.Controls.Add(_diagnostics, 0, 10); Controls.Add(layout);
         _appParamsRoot.TextChanged += (_, _) => InvalidateAnalysis();
         _inputs.CellValueChanged += (_, _) => InvalidateAnalysis();
@@ -129,19 +132,24 @@ internal sealed class NetworkMapControl : UserControl
             });
         };
         _review.CellFormatting += FormatEndpoint;
-        _copyPage.Click += (_, _) => Run(() => { var result = Render(); WindowsClipboard.Write(CfHtml.Build(result.HtmlFragment), result.PlainText); _diagnostics.Text = "Страница скопирована. Вставьте её в Confluence."; });
+        _copyTable.Click += (_, _) => Run(() =>
+        {
+            var result = NetworkMapGenerator.RenderTable(_template!, ReviewedAnalysis());
+            WindowsClipboard.Write(CfHtml.Build(result.HtmlFragment), result.PlainText);
+            _diagnostics.Text = "Макрос Table Transformer скопирован. Вставьте его в редактор Confluence.";
+        });
         _copyXml.Click += (_, _) => Run(() => { var xml = NetworkMapGenerator.CreateDiagram(ReviewedAnalysis()); Clipboard.SetDataObject(xml, true, 10, 50); _diagnostics.Text = "XML скопирован. В draw.io откройте Extras → Edit Diagram, замените XML и нажмите Apply."; });
         _diagnostics.Text = string.IsNullOrWhiteSpace(settings.Network.TemplateHtml)
-            ? "Можно начать без буфера: добавьте сервисы и нажмите «Анализировать (базовый шаблон)»."
-            : "Сетевой шаблон сохранён. Добавьте сервисы и выполните анализ.";
+            ? "Добавьте сервисы и нажмите «Анализ: базовая таблица»."
+            : "Шаблон таблицы сохранён. Добавьте сервисы и выполните анализ.";
         RefreshClipboardIndicator();
     }
     public void RefreshClipboardIndicator()
     {
         try
         {
-            NetworkMapGenerator.ValidateTemplate(WindowsClipboard.ReadHtmlOnce());
-            _clipboardIndicator.Text = "В буфере сетевой шаблон с draw.io и Table Transformer.";
+            NetworkMapGenerator.ExtractTableTemplate(WindowsClipboard.ReadHtmlOnce());
+            _clipboardIndicator.Text = "В буфере Table Transformer с исходной таблицей.";
             _clipboardIndicator.ForeColor = Color.ForestGreen;
         }
         catch (System.Runtime.InteropServices.ExternalException)
@@ -151,7 +159,7 @@ internal sealed class NetworkMapControl : UserControl
         }
         catch (Exception)
         {
-            _clipboardIndicator.Text = "Шаблона в буфере нет. Доступен встроенный базовый шаблон.";
+            _clipboardIndicator.Text = "Скопируйте Table Transformer или выберите базовую таблицу.";
             _clipboardIndicator.ForeColor = Color.DimGray;
         }
     }
@@ -162,7 +170,7 @@ internal sealed class NetworkMapControl : UserControl
         catch (Exception error) { MessageBox.Show(this, error.Message, "Сетевая карта", MessageBoxButtons.OK, MessageBoxIcon.Error); }
         finally { UseWaitCursor = false; }
     }
-    private void InvalidateAnalysis() { _analysis = null; _copyPage.Enabled = _copyXml.Enabled = false; _review.DataSource = null; }
+    private void InvalidateAnalysis() { _analysis = null; _copyTable.Enabled = _copyXml.Enabled = false; _review.DataSource = null; }
     public void SaveInputs()
     {
         _inputs.EndEdit();
@@ -194,6 +202,39 @@ internal sealed class NetworkMapControl : UserControl
         }
         InvalidateAnalysis();
     }
+    private void CopyKafkaTopics()
+    {
+        if (_settings.KafkaTopicRules.Count == 0)
+        {
+            _diagnostics.Text = "Добавьте путь к топикам в окне «Правила топиков…».";
+            return;
+        }
+        if (!_inputs.EndEdit()) return;
+        var result = KafkaTopicReport.RenderForServices(Root, _services.ToArray(), _settings.KafkaTopicRules);
+        if (result.TopicCount == 0)
+        {
+            _diagnostics.Text = "В prod-конфигурациях добавленных сервисов топики по заданным правилам не найдены.";
+            return;
+        }
+        WindowsClipboard.Write(CfHtml.Build(result.HtmlFragment), result.PlainText);
+        _diagnostics.Text = $"Скопировано строк с топиками — {result.TopicCount}, таблиц по сервисам и Kafka — {result.ClusterCount}. Вставьте их в редактор Confluence.";
+    }
+
+    private void EditKafkaTopicRules()
+    {
+        using var dialog = new KafkaTopicRulesForm(_settings.KafkaTopicRules);
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        var previous = _settings.KafkaTopicRules;
+        _settings.KafkaTopicRules = dialog.Rules;
+        try { _settings.Save(); }
+        catch
+        {
+            _settings.KafkaTopicRules = previous;
+            throw;
+        }
+        _diagnostics.Text = "Правила топиков Kafka сохранены.";
+    }
+
     private enum TemplateSource { Basic, Clipboard, Saved }
 
     private void EditNetworkParameters()
@@ -203,14 +244,14 @@ internal sealed class NetworkMapControl : UserControl
             entries => NetworkParameterCatalog.SaveCatalog(_settings.Network, entries, analysis, _settings.Save),
             draft => NetworkTemplatePrefill.ReadFirstWithRows(PrefillSources(), analysis?.Connections ?? [], draft));
         if (dialog.ShowDialog(this) == DialogResult.OK)
-            _diagnostics.Text = "Параметры сети сохранены. Правки будут видны при копировании схемы и страницы.";
+            _diagnostics.Text = "Параметры сети сохранены. Правки будут видны при копировании таблицы и схемы.";
     }
 
     private IEnumerable<(string Name, string? Html)> PrefillSources()
     {
         yield return ("Текущий шаблон", _template);
         yield return ("Сохранённый шаблон", _settings.Network.TemplateHtml);
-        yield return ("Страница, скопированная при анализе", _clipboard);
+        yield return ("Таблица, скопированная при анализе", _prefillClipboardTemplate);
 
         string? currentClipboard;
         try { currentClipboard = WindowsClipboard.ReadHtml(); }
@@ -225,23 +266,22 @@ internal sealed class NetworkMapControl : UserControl
     private void Analyze(TemplateSource source)
     {
         InvalidateAnalysis(); SaveInputs();
-        _clipboard = null;
-        if (source == TemplateSource.Clipboard) _clipboard = WindowsClipboard.ReadHtml();
-        else if (source == TemplateSource.Saved)
+        _prefillClipboardTemplate = null;
+        var template = source switch
         {
-            try { _clipboard = WindowsClipboard.ReadHtml(); }
+            TemplateSource.Clipboard => WindowsClipboard.ReadHtml(),
+            TemplateSource.Saved => _settings.Network.TemplateHtml,
+            _ => NetworkTableTemplates.BasicHtml
+        };
+        var tableTemplate = NetworkMapGenerator.ExtractTableTemplate(template);
+        if (source == TemplateSource.Saved)
+        {
+            try { _prefillClipboardTemplate = NetworkMapGenerator.ExtractTableTemplate(WindowsClipboard.ReadHtml()); }
             catch (InvalidDataException) { }
             catch (System.Runtime.InteropServices.ExternalException) { }
         }
-        var template = source switch
-        {
-            TemplateSource.Clipboard => _clipboard!,
-            TemplateSource.Saved => _settings.Network.TemplateHtml,
-            _ => NetworkPageTemplates.BasicHtml
-        };
-        NetworkMapGenerator.ValidateTemplate(template);
         _analysis = NetworkMapGenerator.Analyze(Root, _settings.Network);
-        _template = template;
+        _template = tableTemplate;
         _binding = true;
         try
         {
@@ -261,7 +301,7 @@ internal sealed class NetworkMapControl : UserControl
             _review.DataSource = new BindingList<ReviewRow>(_analysis.Connections.Select(c => new ReviewRow(c)).ToList());
         }
         finally { _binding = false; }
-        _copyPage.Enabled = _copyXml.Enabled = true;
+        _copyTable.Enabled = _copyXml.Enabled = true;
         _diagnostics.Text = string.Join(Environment.NewLine, _analysis.Diagnostics.Append("Проверьте протоколы и значения. Отличия адресов у общих параметров будут показаны с именами сервисов."));
         _settings.Save();
     }
@@ -279,8 +319,6 @@ internal sealed class NetworkMapControl : UserControl
         ToolTipText = "Узлы с одинаковым именем блока входят в один контейнер. Для отдельного узла очистите оба поля блока.",
         DefaultCellStyle = new DataGridViewCellStyle { DataSourceNullValue = "" }
     };
-    private NetworkMapResult Render() => NetworkMapGenerator.Render(_template!, _clipboard, ReviewedAnalysis());
-
     private NetworkAnalysis ReviewedAnalysis()
     {
         _review.EndEdit();

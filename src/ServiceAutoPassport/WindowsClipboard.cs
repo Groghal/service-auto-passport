@@ -29,7 +29,7 @@ internal static class WindowsClipboard
     {
         var data = Clipboard.GetDataObject();
         if (data is null || !data.GetDataPresent(DataFormats.Html, false))
-            throw new InvalidDataException("Буфер обмена не содержит HTML. Скопируйте полную страницу из Confluence.");
+            throw new InvalidDataException("Буфер обмена не содержит HTML. Скопируйте шаблон из редактора Confluence.");
 
         return data.GetData(DataFormats.Html, false) switch
         {

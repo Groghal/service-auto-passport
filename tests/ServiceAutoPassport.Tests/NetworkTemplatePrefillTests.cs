@@ -62,8 +62,8 @@ public sealed class NetworkTemplatePrefillTests : IDisposable
         var other = Assert.Single(second.Connections).ExternalTarget;
         Assert.Equal("Новый URL", other.Label);
         Assert.Equal("", other.Block);
-        var page = NetworkMapGenerator.Render(NetworkPageTemplates.BasicHtml, null, second);
-        Assert.Contains("Новый URL", page.DrawioXml);
+        var page = NetworkMapGenerator.RenderTable(NetworkTableTemplates.BasicHtml, second);
+        Assert.Contains("Новый URL", NetworkMapGenerator.CreateDiagram(second));
         Assert.Contains("Новый URL", page.HtmlFragment);
         var roundTrip = NetworkTemplatePrefill.Read(CfHtml.Build(page.HtmlFragment), [], new Dictionary<string, NetworkParameterEdit>());
         Assert.Equal(new NetworkParameterEdit(other.Label, other.Block), roundTrip.Edits["parameter:NEW_HOST"]);
@@ -84,7 +84,7 @@ public sealed class NetworkTemplatePrefillTests : IDisposable
         var direct = settings.Targets["parameter:DIRECT_HOST"];
         direct.Block = "";
         direct.ParentBlock = "k8s";
-        var page = NetworkMapGenerator.Render(NetworkPageTemplates.BasicHtml, null, analysis);
+        var page = NetworkMapGenerator.RenderTable(NetworkTableTemplates.BasicHtml, analysis);
         var edits = NetworkTemplatePrefill.Read(page.HtmlFragment, analysis.Connections, new Dictionary<string, NetworkParameterEdit>()).Edits;
         Assert.Equal(new NetworkParameterEdit("Kafka", "Pipeline") { ParentBlock = "k8s" }, edits["parameter:KAFKA_HOST"]);
         Assert.Equal(new NetworkParameterEdit("Direct", "") { ParentBlock = "k8s" }, edits["parameter:DIRECT_HOST"]);
@@ -127,7 +127,7 @@ public sealed class NetworkTemplatePrefillTests : IDisposable
 
         draft.Remove(connection.TargetKey);
         var preview = NetworkTemplatePrefill.ReadFirstWithRows(
-            [("Текущий шаблон", NetworkPageTemplates.BasicHtml), ("Сохранённый шаблон", template)],
+            [("Текущий шаблон", NetworkTableTemplates.BasicHtml), ("Сохранённый шаблон", template)],
             analysis.Connections, draft);
         Assert.Equal("Сохранённый шаблон", preview.Source);
         Assert.Equal("Имя из шаблона", Assert.Single(preview.Edits).Value.Label);
@@ -144,8 +144,8 @@ public sealed class NetworkTemplatePrefillTests : IDisposable
         Assert.Same(target, settings.Targets[connection.TargetKey]);
         Assert.Equal("Имя из шаблона", target.Label);
         Assert.Equal("", target.Block);
-        var result = NetworkMapGenerator.Render(NetworkPageTemplates.BasicHtml, null, analysis);
-        Assert.Contains("Имя из шаблона", result.DrawioXml);
+        var result = NetworkMapGenerator.RenderTable(NetworkTableTemplates.BasicHtml, analysis);
+        Assert.Contains("Имя из шаблона", NetworkMapGenerator.CreateDiagram(analysis));
         Assert.Contains("Имя из шаблона", result.HtmlFragment);
     }
 
@@ -206,7 +206,7 @@ public sealed class NetworkTemplatePrefillTests : IDisposable
         Assert.Equal("k8s", edit.Value.Block);
         Assert.True(edit.Value.BlockIsAutomatic);
         Assert.Equal(4, edits.Skipped.Count);
-        var empty = NetworkTemplatePrefill.Read(NetworkPageTemplates.BasicHtml, [], new Dictionary<string, NetworkParameterEdit>());
+        var empty = NetworkTemplatePrefill.Read(NetworkTableTemplates.BasicHtml, [], new Dictionary<string, NetworkParameterEdit>());
         Assert.Empty(empty.Edits);
         Assert.Empty(empty.Skipped);
     }

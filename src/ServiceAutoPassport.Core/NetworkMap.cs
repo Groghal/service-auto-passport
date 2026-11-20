@@ -3,7 +3,6 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using HtmlAgilityPack;
-using YamlDotNet.RepresentationModel;
 
 namespace ServiceAutoPassport.Core;
 
@@ -108,48 +107,18 @@ public sealed class NetworkConnection
     public Dictionary<string, string> Endpoints { get; } = new();
 }
 internal readonly record struct NetworkTransport(int Port, string? Protocol);
+internal readonly record struct NetworkAddress(string Host, string Port, string Scheme);
 public sealed record NetworkAnalysis(IReadOnlyList<NetworkServiceInput> Services, IReadOnlyList<string> Environments,
     IReadOnlyList<NetworkConnection> Connections, IReadOnlyList<string> Diagnostics, NetworkDisplayOptions? Display = null);
-public sealed record NetworkMapResult(string HtmlFragment, string PlainText, string DrawioXml);
+public sealed record NetworkTableResult(string HtmlFragment, string PlainText);
 
 public static class NetworkMapGenerator
 {
     internal static string Id(string text) => "n" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)))[..16];
-    private static readonly Regex Placeholder = new(@"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}");
-    private static readonly Regex Sentinel = new(@"J2REF_([A-Za-z_][A-Za-z0-9_]*?)_J2END");
+    private static readonly Regex Placeholder = J2Variables.PlaceholderRegex();
     private static readonly Regex EndpointName = new(@"(hosts?|urls?|uris?|endpoints?|bootstrapservers|servers)$", RegexOptions.IgnoreCase);
     private static readonly Regex Sensitive = new(@"(password|secret|token|username|accesskey|certificate|keystore|truststore|allowedhosts)", RegexOptions.IgnoreCase);
 
-    internal static Dictionary<string, string?> Read(string file, bool template = false)
-    {
-        var text = File.ReadAllText(file);
-        if (template)
-        {
-            if (text.Contains("{%") || text.Contains("{#")) throw new InvalidDataException($"Неподдерживаемая конструкция Jinja: {file}");
-            text = Placeholder.Replace(text, m => "J2REF_" + m.Groups[1].Value + "_J2END");
-            if (text.Contains("{{")) throw new InvalidDataException($"Неподдерживаемое выражение Jinja: {file}");
-        }
-        var stream = new YamlStream();
-        try { stream.Load(new StringReader(text)); }
-        catch (YamlDotNet.Core.YamlException e)
-        { throw new InvalidDataException($"Ошибка YAML/J2: {file}, строка {e.Start.Line}, колонка {e.Start.Column}."); }
-        if (stream.Documents.Count == 0 || stream.Documents.Count == 1 && stream.Documents[0].RootNode is YamlScalarNode empty && string.IsNullOrWhiteSpace(empty.Value)) return new();
-        if (stream.Documents.Count != 1 || stream.Documents[0].RootNode is not YamlMappingNode)
-            throw new InvalidDataException($"Ожидается объект конфигурации: {file}");
-        var result = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        void Walk(YamlNode node, string path)
-        {
-            if (node is YamlMappingNode map)
-                foreach (var pair in map.Children)
-                    Walk(pair.Value, (path.Length == 0 ? "" : path + ".") + ((YamlScalarNode)pair.Key).Value!.Replace("__", "."));
-            else if (node is YamlSequenceNode seq)
-                for (var i = 0; i < seq.Children.Count; i++) Walk(seq.Children[i], path + "." + i);
-            else if (node is YamlScalarNode scalar)
-                result[path] = template ? Sentinel.Replace(scalar.Value ?? "", m => "{{ " + m.Groups[1].Value + " }}") : scalar.Value;
-        }
-        Walk(stream.Documents[0].RootNode, "");
-        return result;
-    }
     public static NetworkAnalysis Analyze(string root, NetworkMapSettings settings)
     {
         if (!Directory.Exists(root)) throw new DirectoryNotFoundException("Не найден app-params.");
@@ -170,13 +139,8 @@ public static class NetworkMapGenerator
         foreach (var service in settings.Services)
         {
             if (string.IsNullOrWhiteSpace(service.Label)) service.Label = ServiceComponent.DeploymentName(Path.GetDirectoryName(service.J2File)!);
-            var config = Read(service.J2File, true);
-            var folder = Path.GetDirectoryName(service.J2File)!;
-            var filename = Path.GetFileName(service.J2File);
-            var secret = filename.EndsWith(".deploy.j2", StringComparison.OrdinalIgnoreCase)
-                ? Path.Combine(folder, filename[..^10] + ".secrets.j2") : "";
-            if (!File.Exists(secret)) secret = Path.Combine(folder, "secrets.j2");
-            if (File.Exists(secret)) foreach (var pair in Read(secret, true)) config[pair.Key] = pair.Value;
+            var config = ServiceConfiguration.Read(service.J2File)
+                .ToDictionary(pair => pair.Key, pair => pair.Value.Value, StringComparer.OrdinalIgnoreCase);
             var envs = settings.Environments.ToDictionary(e => e, e => YamlConfiguration.LoadForEnvironment(root, service.YamlService, e));
             foreach (var pair in config)
             {
@@ -284,7 +248,7 @@ public static class NetworkMapGenerator
         "redis" or "rediss" => "Redis", "kafka" => "Kafka", "mongodb" => "MongoDB",
         "postgres" or "postgresql" => "PostgreSQL", "mysql" => "MySQL", "sqlserver" => "SQL Server", _ => null
     };
-    private static string Guess(string path, string value, Dictionary<string, string?> config)
+    private static string Guess(string path, string value, Dictionary<string, string> config)
     {
         var scheme = Regex.Match(value, @"^(\w+)://").Groups[1].Value;
         if (SchemeProtocol(scheme) is { } known) return known;
@@ -296,20 +260,11 @@ public static class NetworkMapGenerator
         if (value.Contains("Host=", StringComparison.OrdinalIgnoreCase) && path.StartsWith("ConnectionStrings.")) return "PostgreSQL";
         return "Unknown";
     }
-    private static string Expand(string expression, IReadOnlyDictionary<string, string?> values, HashSet<string> stack)
+    private static string NormalizeEndpointValue(string value)
     {
-        if (stack.Count > 128) throw new InvalidDataException("слишком глубокая цепочка ссылок");
-        return Placeholder.Replace(expression, match =>
-        {
-            var key = match.Groups[1].Value;
-            if (!stack.Add(key)) throw new InvalidDataException("циклическая ссылка: " + key);
-            if (!values.TryGetValue(key, out var value) || value is null) throw new InvalidDataException("не найдено: " + key);
-            if (TryDatabase(value, out var dbHost, out var dbPort)) value = dbHost + (dbPort.Length > 0 ? ":" + dbPort : "");
-            if (value.Contains("://")) value = Regex.Replace(Regex.Replace(value, @"(?<=://)[^/@]*@", ""), @"^(\w+://[^/?#]+).*$", "$1");
-            var result = Expand(value, values, stack);
-            stack.Remove(key);
-            return result;
-        });
+        if (TryDatabase(value, out var dbHost, out var dbPort)) value = dbHost + (dbPort.Length > 0 ? ":" + dbPort : "");
+        if (value.Contains("://")) value = Regex.Replace(Regex.Replace(value, @"(?<=://)[^/@]*@", ""), @"^(\w+://[^/?#]+).*$", "$1");
+        return value;
     }
     public static void Refresh(NetworkAnalysis analysis, IReadOnlyDictionary<string, int> ports)
     {
@@ -320,35 +275,28 @@ public static class NetworkMapGenerator
             {
                 try
                 {
-                    var host = Expand(c.Host, c.Values[env], new());
-                    var port = Expand(c.Port, c.Values[env], new());
+                    var host = J2Variables.Expand(c.Host, c.Values[env], NormalizeEndpointValue);
+                    var port = J2Variables.Expand(c.Port, c.Values[env], NormalizeEndpointValue);
                     var results = new List<string>();
                     var transports = new List<NetworkTransport>();
                     if (TryDatabase(host, out var dbHost, out var dbPort)) { host = dbHost; if (port.Length == 0) port = dbPort; }
                     if (host.Contains('=')) throw new InvalidDataException("формат строки подключения не распознан");
                     foreach (var address in host.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
                     {
-                        string hostname;
-                        var selectedPort = port;
-                        var uriText = address.Contains("://") ? address : "tcp://" + address;
-                        if (!Uri.TryCreate(uriText, UriKind.Absolute, out var uri) || uri.Host.Length == 0 || uri.Host.Contains('{'))
-                            throw new InvalidDataException("адрес не распознан");
-                        hostname = uri.Host.Trim('[', ']');
-                        if (hostname.Contains(':')) hostname = "[" + hostname + "]";
-                        var explicitAuthority = Regex.IsMatch(uri.OriginalString, @"^[^:]+://[^/?#]*:\d+(?:[/?#]|$)");
-                        if (selectedPort.Length == 0 && explicitAuthority) selectedPort = uri.Port.ToString();
+                        var endpoint = ParseAddress(address) ?? throw new InvalidDataException("адрес не распознан");
+                        var selectedPort = port.Length > 0 ? port : endpoint.Port;
                         var inferred = false;
                         if (selectedPort.Length == 0)
                         {
-                            var protocol = SchemeProtocol(uri.Scheme) ?? c.Choice.Protocol;
+                            var protocol = SchemeProtocol(endpoint.Scheme) ?? c.Choice.Protocol;
                             if (ports.TryGetValue(protocol, out var fallback)) { selectedPort = fallback.ToString(); inferred = true; }
                         }
                         if (selectedPort.Length > 0)
                         {
                             if (!TryPort(selectedPort, out var numeric)) throw new InvalidDataException("некорректный порт");
-                            transports.Add(new NetworkTransport(numeric, KnownProtocol(c.Choice.Protocol) ?? SchemeProtocol(uri.Scheme)));
+                            transports.Add(new NetworkTransport(numeric, KnownProtocol(c.Choice.Protocol) ?? SchemeProtocol(endpoint.Scheme)));
                         }
-                        results.Add(hostname + (selectedPort.Length == 0 ? " (порт не указан)" : ":" + selectedPort) + (inferred ? " (порт по умолчанию)" : ""));
+                        results.Add(endpoint.Host + (selectedPort.Length == 0 ? " (порт не указан)" : ":" + selectedPort) + (inferred ? " (порт по умолчанию)" : ""));
                     }
                     c.Endpoints[env] = results.Count == 0 ? "значение не найдено" : string.Join("\n", results.Distinct());
                     c.Transports.UnionWith(transports);
@@ -358,7 +306,17 @@ public static class NetworkMapGenerator
         }
     }
 
-    private static bool TryPort(string port, out int numeric) =>
+    internal static NetworkAddress? ParseAddress(string address)
+    {
+        var uriText = address.Contains("://") ? address : "tcp://" + address;
+        if (!Uri.TryCreate(uriText, UriKind.Absolute, out var uri) || uri.Host.Length == 0 || uri.Host.Contains('{')) return null;
+        var hostname = uri.Host.Trim('[', ']');
+        if (hostname.Contains(':')) hostname = "[" + hostname + "]";
+        var explicitPort = Regex.IsMatch(uri.OriginalString, @"^[^:]+://[^/?#]*:\d+(?:[/?#]|$)");
+        return new NetworkAddress(hostname, explicitPort ? uri.Port.ToString() : "", uri.Scheme);
+    }
+
+    internal static bool TryPort(string port, out int numeric) =>
         int.TryParse(port, out numeric) && numeric is >= 1 and <= 65535;
 
     private static string? KnownProtocol(string protocol) =>
@@ -371,35 +329,16 @@ public static class NetworkMapGenerator
         return TryPort(connection.Port, out var port) ? [new NetworkTransport(port, KnownProtocol(connection.Choice.Protocol))] : [];
     }
 
-    private static HtmlDocument Parse(string html) { var doc = new HtmlDocument(); doc.LoadHtml(CfHtml.ExtractFragment(html)); return doc; }
-    private static HtmlNode DiagramSlot(HtmlDocument doc)
-    {
-        var nodes = doc.DocumentNode.Descendants().Where(n => n.GetAttributeValue("data-macro-name", "") == "drawio" || n.GetAttributeValue("data-network-diagram-placeholder", "") == "true").ToArray();
-        return nodes.Length == 1 ? nodes[0] : throw new InvalidDataException("Страница должна содержать ровно один макрос drawio или место для диаграммы из базового шаблона.");
-    }
-    public static void ValidateTemplate(string html)
-    {
-        var doc = Parse(html);
-        DiagramSlot(doc);
-        NetworkTableTransformer.Find(doc);
-    }
+    public static string ExtractTableTemplate(string html) => NetworkTableTransformer.Find(html).Macro.OuterHtml;
 
-    public static NetworkMapResult Render(string templateHtml, string? clipboardHtml, NetworkAnalysis analysis)
+    public static NetworkTableResult RenderTable(string templateHtml, NetworkAnalysis analysis)
     {
-        var doc = Parse(templateHtml);
-        var slot = DiagramSlot(doc);
-        var macros = string.IsNullOrWhiteSpace(clipboardHtml) ? Array.Empty<HtmlNode>() : Parse(clipboardHtml).DocumentNode.Descendants()
-            .Where(n => n.GetAttributeValue("data-macro-name", "") == "drawio").ToArray();
-        if (macros.Length > 1) throw new InvalidDataException("В буфере несколько draw.io макросов. Скопируйте одну сетевую страницу.");
-        var replacement = macros.Length == 1 ? macros[0] : DiagramSlot(Parse(NetworkPageTemplates.BasicHtml));
-        slot.ParentNode!.ReplaceChild(replacement.CloneNode(true), slot);
+        var template = NetworkTableTransformer.Find(templateHtml);
         var targets = Targets(analysis);
-        var diagram = Diagram(analysis, targets, out var blockParents);
-        NetworkTableTransformer.Fill(doc, analysis.Environments, targets, blockParents, SharedContainers(analysis));
-        return new(doc.DocumentNode.InnerHtml, HtmlEntity.DeEntitize(doc.DocumentNode.InnerText), diagram);
+        var blockParents = ResolveBlockParents(analysis, VisibleVertices(analysis, targets));
+        NetworkTableTransformer.Fill(template, analysis.Environments, targets, blockParents, SharedContainers(analysis));
+        return new(template.Macro.OuterHtml, HtmlEntity.DeEntitize(template.Macro.InnerText));
     }
-
-    public static string CreateDiagram(NetworkAnalysis analysis) => Diagram(analysis, Targets(analysis), out _);
 
     private static DiagramVertex ServiceVertex(NetworkServiceInput service) =>
         new(service.Id, service.Label, DiagramColumn.Services, service.Block?.Trim() ?? "", service.ParentBlock?.Trim() ?? "");
@@ -449,12 +388,16 @@ public static class NetworkMapGenerator
         return shared;
     }
 
-    private static string Diagram(NetworkAnalysis analysis, NetworkTarget[] targets, out IReadOnlyDictionary<string, string> blockParents)
+    private static DiagramVertex[] VisibleVertices(NetworkAnalysis analysis, NetworkTarget[] targets) =>
+        analysis.Services.Select(ServiceVertex)
+            .Concat(targets.Where(target => target.Vertex.Column != DiagramColumn.Services).Select(target => target.Vertex)).ToArray();
+
+    public static string CreateDiagram(NetworkAnalysis analysis)
     {
         var display = analysis.Display ?? new NetworkDisplayOptions();
-        var vertices = analysis.Services.Select(ServiceVertex)
-            .Concat(targets.Where(target => target.Vertex.Column != DiagramColumn.Services).Select(target => target.Vertex)).ToArray();
-        blockParents = ResolveBlockParents(analysis, vertices);
+        var targets = Targets(analysis);
+        var vertices = VisibleVertices(analysis, targets);
+        var blockParents = ResolveBlockParents(analysis, vertices);
         var links = targets.SelectMany(target => target.Connections.GroupBy(c => c.Service.Id).Select(calls =>
         {
             var paths = calls.Select(c => c.Path).Distinct().Order(StringComparer.Ordinal);

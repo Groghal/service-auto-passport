@@ -45,9 +45,7 @@ public static class NetworkTemplatePrefill
     public static NetworkTemplatePrefillResult Read(string template, IReadOnlyList<NetworkConnection> connections,
         IReadOnlyDictionary<string, NetworkParameterEdit> draft)
     {
-        var doc = new HtmlDocument();
-        doc.LoadHtml(CfHtml.ExtractFragment(template));
-        var (_, table) = NetworkTableTransformer.Find(doc);
+        var (_, table) = NetworkTableTransformer.Find(template);
         var rows = table.Descendants("tr").Where(row => row.Ancestors("table").FirstOrDefault() == table)
             .Select(row => row.ChildNodes.Where(cell => cell.Name is "th" or "td").ToArray()).ToArray();
         var edits = new Dictionary<string, NetworkParameterEdit>(StringComparer.Ordinal);

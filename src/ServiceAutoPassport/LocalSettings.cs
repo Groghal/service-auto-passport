@@ -13,6 +13,7 @@ internal sealed class LocalSettings
     };
 
     public NetworkMapSettings Network { get; set; } = new();
+    public List<KafkaTopicRule> KafkaTopicRules { get; set; } = [.. KafkaTopicReport.DefaultRules];
     public string? NetworkAppParamsRoot { get; set; }
     public string AppParamsRoot { get; set; } = "";
     public string ServiceFolder { get; set; } = "";
@@ -43,6 +44,7 @@ internal sealed class LocalSettings
             var settings = JsonSerializer.Deserialize<LocalSettings>(File.ReadAllText(path), JsonOptions)
                 ?? new LocalSettings();
             settings.Network ??= new NetworkMapSettings();
+            settings.KafkaTopicRules ??= [.. KafkaTopicReport.DefaultRules];
             settings.Services ??= new Dictionary<string, ServiceIdentity>(StringComparer.Ordinal);
             settings.KeyDescriptions ??= new Dictionary<string, string>(StringComparer.Ordinal);
             settings.HtmlDescriptionKeys ??= new HashSet<string>(StringComparer.Ordinal);
