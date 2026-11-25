@@ -1,7 +1,6 @@
 {
   "appParamsRoot": "",
   "serviceFolder": "",
-  "selectedService": "my-service",
   "selectedTemplate": "appsettings.deploy.j2",
   "defaultTemplateHtml": "",
   "keyDescriptions": {},

@@ -14,7 +14,7 @@ internal sealed class MainForm : Form
     private readonly NetworkMapControl _network;
     private readonly TextBox _appParamsRoot = new() { Dock = DockStyle.Fill };
     private readonly TextBox _serviceFolder = new() { Dock = DockStyle.Fill };
-    private readonly ComboBox _service = new() { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDown };
+    private readonly TextBox _service = new() { Dock = DockStyle.Fill, PlaceholderText = "Имя папки, если пусто" };
     private readonly ComboBox _template = new() { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly ComboBox _domainApi = new()
     {
@@ -46,9 +46,9 @@ internal sealed class MainForm : Form
     private readonly Button _generateFromDefault = new() { Text = "Сохранённый шаблон + буфер", Dock = DockStyle.Fill };
 
     private string? _activeService;
+    private string? _activeServiceFolder;
     private string? _lastCheckedClipboardHtml;
     private string? _generatedClipboardHtml;
-    private bool _refreshing;
 
     public MainForm()
     {
@@ -75,19 +75,8 @@ internal sealed class MainForm : Form
         _generateFromDefault.Enabled = !string.IsNullOrWhiteSpace(_settings.DefaultTemplateHtml);
         _appParamsRoot.Text = _settings.AppParamsRoot;
         _serviceFolder.Text = _settings.ServiceFolder;
-        _service.SelectedIndexChanged += (_, _) =>
-        {
-            if (_refreshing || _service.SelectedIndex < 0) return;
-            CaptureIdentity();
-            LoadIdentity();
-        };
-        _service.Leave += (_, _) =>
-        {
-            if (_refreshing || _activeService == CurrentService) return;
-            CaptureIdentity();
-            LoadIdentity();
-        };
-        _appParamsRoot.Leave += (_, _) => TryRefresh(() => RefreshServices(preferFolder: true));
+        _service.Leave += (_, _) => TryRefresh(RefreshDomainApiVariables);
+        _appParamsRoot.Leave += (_, _) => TryRefresh(RefreshDomainApiVariables);
         _serviceFolder.Leave += (_, _) => TryRefresh(RefreshForServiceFolder);
         _saveTemplate.Click += SaveDefaultTemplate;
         _editKeyDescriptions.Click += EditKeyDescriptions;
@@ -117,8 +106,7 @@ internal sealed class MainForm : Form
             }
         };
 
-        TryRefresh(() => RefreshServices());
-        TryRefresh(RefreshTemplates);
+        TryRefresh(RefreshForServiceFolder);
     }
 
     private void BuildLayout()
@@ -143,7 +131,7 @@ internal sealed class MainForm : Form
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleLeft,
             Text = "Выберите каталог app-params и папку сервиса. " +
-                   "Имя сервиса предлагается по папке; для UI J2 необязателен, папка сервиса в app-params необязательна. " +
+                   "Имя сервиса заполняется по папке. Для UI можно выбрать «Без J2 (для UI)». " +
                    "Для сохранения или прямого заполнения скопируйте полную страницу Confluence."
         };
         root.Controls.Add(instructions, 0, 0);
@@ -160,19 +148,17 @@ internal sealed class MainForm : Form
             fields.RowStyles.Add(new RowStyle(SizeType.Percent, 100F / fields.RowCount));
 
         AddRow(fields, 0, "Каталог app-params", _appParamsRoot,
-            MakeButton("Выбрать…", (_, _) => BrowseFolder(_appParamsRoot, "Каталог app-params",
-                () => RefreshServices(preferFolder: true))));
+            MakeButton("Выбрать…", (_, _) => BrowseFolder(_appParamsRoot, "Каталог app-params", RefreshDomainApiVariables)));
         AddRow(fields, 1, "Папка сервиса", _serviceFolder,
             MakeButton("Выбрать…", (_, _) => BrowseFolder(_serviceFolder, "Папка сервиса", RefreshForServiceFolder)));
-        AddRow(fields, 2, "Имя сервиса / YAML-папка", _service,
-            MakeButton("Обновить", (_, _) => TryRefresh(() => RefreshServices())));
+        AddRow(fields, 2, "Имя сервиса / YAML-папка", _service);
         AddRow(fields, 3, "Основной J2 файл", _template,
             MakeButton("Обновить", (_, _) => TryRefresh(RefreshTemplates)));
         AddHtmlRow(fields, 4, "Название сервиса", _displayName, _displayNameHtml,
             _displayNamePriority);
         AddHtmlRow(fields, 5, "Команда", _team, _teamHtml, _teamPriority);
         AddRow(fields, 6, "Адрес доменного API", _domainApi,
-            MakeButton("Обновить", (_, _) => TryRefresh(() => RefreshDomainApiVariables(SelectedDomainApiVariable))));
+            MakeButton("Обновить", (_, _) => TryRefresh(RefreshDomainApiVariables)));
         root.Controls.Add(fields, 0, 2);
 
         var descriptions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2 };
@@ -276,37 +262,19 @@ internal sealed class MainForm : Form
         catch (Exception error) { _status.Text = error.Message; }
     }
 
-    private string CurrentService => _service.Text.Trim();
+    private string CurrentService => _service.Text.Trim() is { Length: > 0 } name ? name : _activeService ?? "";
 
     private void RefreshForServiceFolder()
     {
+        var input = _serviceFolder.Text.Trim();
+        var folder = input.Length == 0 ? null : Path.TrimEndingDirectorySeparator(Path.GetFullPath(input));
+        if (string.Equals(folder, _activeServiceFolder, StringComparison.OrdinalIgnoreCase)) return;
+        var name = folder is null ? "" : ServiceComponent.DeploymentName(folder);
         RefreshTemplates();
-        RefreshServices(preferFolder: true);
-    }
-
-    private void RefreshServices(bool preferFolder = false)
-    {
         CaptureIdentity();
-        var current = CurrentService;
-        var names = ServiceInputs.FindServices(_appParamsRoot.Text.Trim());
-        var suggested = ServiceInputs.SuggestServiceName(_serviceFolder.Text.Trim(), names);
-        var preferred = preferFolder ? suggested : current.Length > 0 ? current : _settings.SelectedService;
-        if (string.IsNullOrWhiteSpace(preferred)) preferred = suggested;
-        _refreshing = true;
-        try
-        {
-            _service.Items.Clear();
-            _service.Items.AddRange(names.Cast<object>().ToArray());
-            var index = names.ToList().FindIndex(name =>
-                name.Equals(preferred, StringComparison.OrdinalIgnoreCase));
-            if (index >= 0) _service.SelectedIndex = index;
-            else _service.Text = preferred;
-        }
-        finally
-        {
-            _refreshing = false;
-        }
-
+        _activeServiceFolder = folder;
+        _activeService = name.Length > 0 ? name : null;
+        _service.Text = name;
         LoadIdentity();
     }
 
@@ -328,6 +296,8 @@ internal sealed class MainForm : Form
 
     private string SelectedDomainApiVariable => _domainApi.Text.Trim() is var value &&
         value != DomainApiFromTemplate ? value : "";
+
+    private void RefreshDomainApiVariables() => RefreshDomainApiVariables(SelectedDomainApiVariable);
 
     private void RefreshDomainApiVariables(string preferred)
     {
@@ -357,7 +327,6 @@ internal sealed class MainForm : Form
 
     private void LoadIdentity()
     {
-        _activeService = CurrentService.Length > 0 ? CurrentService : null;
         var identity = _activeService is not null &&
                        _settings.Services.TryGetValue(_activeService, out var stored)
             ? stored : null;
@@ -375,7 +344,6 @@ internal sealed class MainForm : Form
         CaptureIdentity();
         _settings.AppParamsRoot = _appParamsRoot.Text.Trim();
         _settings.ServiceFolder = _serviceFolder.Text.Trim();
-        _settings.SelectedService = CurrentService;
         _settings.SelectedTemplate = _template.SelectedItem as string ?? "";
         _settings.Save();
     }
@@ -477,9 +445,8 @@ internal sealed class MainForm : Form
         {
             var appParamsRoot = ExistingDirectory(_appParamsRoot.Text, "каталог app-params");
             var serviceFolder = ExistingDirectory(_serviceFolder.Text, "папку сервиса");
+            RefreshForServiceFolder();
             var service = CurrentService;
-            if (service.Length == 0)
-                service = ServiceInputs.SuggestServiceName(serviceFolder, ServiceInputs.FindServices(appParamsRoot));
             if (service.Length == 0)
                 throw new InvalidDataException("Укажите имя сервиса или выберите папку сервиса.");
             var template = _template.SelectedItem as string;
@@ -500,13 +467,6 @@ internal sealed class MainForm : Form
             var result = PassportGenerator.Generate(source, options);
             var generatedHtml = CfHtml.Build(result.HtmlFragment);
             WindowsClipboard.Write(generatedHtml, result.PlainText);
-            if (CurrentService.Length == 0)
-            {
-                _refreshing = true;
-                try { _service.Text = service; }
-                finally { _refreshing = false; }
-                _activeService = service;
-            }
             _generatedClipboardHtml = generatedHtml;
             _lastCheckedClipboardHtml = generatedHtml;
             SetClipboardIndicator("В буфере готовый паспорт. Для нового запуска скопируйте исходный шаблон.",

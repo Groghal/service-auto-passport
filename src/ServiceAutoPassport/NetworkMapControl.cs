@@ -74,8 +74,13 @@ internal sealed class NetworkMapControl : UserControl
         kafkaRules.Click += (_, _) => Run(EditKafkaTopicRules);
         actions.Controls.AddRange(new Control[] { add, remove, saveTemplate, kafkaTopics, kafkaRules });
         layout.Controls.Add(actions, 0, 3);
-        foreach (var item in new[] { ("J2File", "Main J2"), ("Label", "Название"), ("YamlService", "YAML-папка"), ("AddressVariables", "Собственные адресные переменные") })
+        foreach (var item in new[] { ("J2File", "Main J2"), ("Label", "Название"), ("YamlService", "YAML-папка") })
             _inputs.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = item.Item1, HeaderText = item.Item2 });
+        _inputs.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            DataPropertyName = nameof(NetworkServiceInput.AddressVariables), HeaderText = "Собственные адресные переменные",
+            DefaultCellStyle = new DataGridViewCellStyle { DataSourceNullValue = "" }
+        });
         _inputs.Columns.Add(BlockColumn(nameof(NetworkServiceInput.Block)));
         _inputs.Columns.Add(new DataGridViewTextBoxColumn
         {
@@ -196,9 +201,10 @@ internal sealed class NetworkMapControl : UserControl
             if (Path.GetFileName(file).EndsWith("secrets.j2", StringComparison.OrdinalIgnoreCase)) continue;
             if (_services.Any(s => s.J2File.Equals(file, StringComparison.OrdinalIgnoreCase))) continue;
             var folder = Path.GetDirectoryName(file)!;
+            var deploymentName = ServiceComponent.DeploymentName(folder);
             var yaml = ServiceInputs.SuggestServiceName(folder, ServiceInputs.FindServices(Root));
-            _settings.Services.TryGetValue(yaml, out var identity);
-            _services.Add(new NetworkServiceInput { J2File = file, Label = ServiceComponent.DeploymentName(folder), YamlService = yaml, AddressVariables = identity?.DomainApiVariable ?? "" });
+            if (!_settings.Services.TryGetValue(deploymentName, out var identity)) _settings.Services.TryGetValue(yaml, out identity);
+            _services.Add(new NetworkServiceInput { J2File = file, Label = deploymentName, YamlService = yaml, AddressVariables = identity?.DomainApiVariable ?? "" });
         }
         InvalidateAnalysis();
     }

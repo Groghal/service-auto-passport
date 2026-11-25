@@ -68,6 +68,126 @@ public sealed class NetworkTests : IDisposable
         Assert.Equal(diagram, NetworkMapGenerator.CreateDiagram(analysis));
     }
     [Fact]
+    public void SvcLinksUseTheProdHostEvenWhenProdIsHiddenAndRespectNameBoundaries()
+    {
+        Write("params/application.yml", """
+            SVC_WEB_URL: https://external.test.example:7443
+            SVC_WEBAPI_URL: https://external-api.test.example
+            SVC_UI_HOST: external-ui.test.example
+            OTHER_HOST: accounts-web
+            """);
+        Write("params/application-prod.yml", """
+            SVC_WEB_URL: '{{ WEB_ADDRESS }}'
+            WEB_ADDRESS: 'https://accounts-web-blue.prod.example:8443/api?x=y'
+            SVC_WEBAPI_URL: https://accounts-webapi.prod.example:8443
+            SVC_UI_HOST: external-ui.prod.example
+            """);
+        Write("params/caller/caller-prod.yml", "SVC_UI_HOST: accounts-ui2.prod.example:8080\n");
+        var caller = Write("Caller/appsettings.deploy.j2", """
+            {"Web":{"Url":"{{ SVC_WEB_URL }}"},"WebApi":{"Url":"{{ SVC_WEBAPI_URL }}"},
+             "Ui":{"Host":"{{ SVC_UI_HOST }}"},"Other":{"Host":"{{ OTHER_HOST }}"}}
+            """);
+        var settings = new NetworkMapSettings
+        {
+            Environments = ["test"],
+            Services =
+            [
+                new() { J2File = caller, YamlService = "caller", Label = "Caller" },
+                new() { J2File = Write("Accounts.Web/appsettings.deploy.j2", "{}"), Label = "Web" },
+                new() { J2File = Write("FrontendCode/appsettings.deploy.j2", "{}"), YamlService = "accounts_ui", Label = "UI" }
+            ]
+        };
+
+        var analysis = NetworkMapGenerator.Analyze(Path.Combine(_root, "params"), settings);
+        var calls = analysis.Connections.ToDictionary(call => call.Path, StringComparer.Ordinal);
+        Assert.Equal(settings.Services[1].Id, calls["Web.Url"].Choice.TargetService);
+        Assert.Equal(settings.Services[2].Id, calls["Ui.Host"].Choice.TargetService);
+        Assert.Equal("", calls["WebApi.Url"].Choice.TargetService);
+        Assert.Equal("", calls["Other.Host"].Choice.TargetService);
+        var diagram = XDocument.Parse(NetworkMapGenerator.CreateDiagram(analysis));
+        var edge = Assert.Single(diagram.Descendants("mxCell").Where(c => (string?)c.Attribute("sourcePath") == "Web.Url"));
+        Assert.Equal(settings.Services[1].Id, (string?)edge.Attribute("target"));
+        var table = NetworkMapGenerator.RenderTable(NetworkTableTemplates.BasicHtml, analysis);
+        Assert.Contains("external.test.example:7443", table.HtmlFragment);
+        Assert.DoesNotContain("accounts-web-blue.prod.example", table.HtmlFragment);
+    }
+
+    [Fact]
+    public void SvcHostListsRequireOneTargetAndPreferTheLongestMatchingName()
+    {
+        Write("params/application-prod.yml", """
+            SVC_ONE_HOST: 'accounts-web-blue.prod.example:8443; accounts-web-blue-2.prod.example:8444'
+            SVC_DIFFERENT_HOST: 'accounts-web.prod.example:8443, accounts-web-blue.prod.example:8443'
+            SVC_PARTIAL_HOST: 'accounts-web.prod.example:8443, unrelated.prod.example:8443'
+            SVC_SELF_HOST: caller.prod.example
+            """);
+        var caller = Write("Caller/appsettings.deploy.j2", """
+            {"One":{"Host":"{{ SVC_ONE_HOST }}"},"Different":{"Host":"{{ SVC_DIFFERENT_HOST }}"},
+             "Partial":{"Host":"{{ SVC_PARTIAL_HOST }}"},"Self":{"Host":"{{ SVC_SELF_HOST }}"}}
+            """);
+        var settings = new NetworkMapSettings
+        {
+            Environments = ["prod"],
+            Services =
+            [
+                new() { J2File = caller, Label = "Caller" },
+                new() { J2File = Write("Accounts-Web/appsettings.deploy.j2", "{}"), Label = "Web" },
+                new() { J2File = Write("Accounts-Web-Blue/appsettings.deploy.j2", "{}"), Label = "Blue" }
+            ]
+        };
+        var root = Path.Combine(_root, "params");
+        var analysis = NetworkMapGenerator.Analyze(root, settings);
+        var calls = analysis.Connections.ToDictionary(call => call.Path);
+        Assert.Equal(settings.Services[2].Id, calls["One.Host"].Choice.TargetService);
+        Assert.Equal("", calls["Different.Host"].Choice.TargetService);
+        Assert.Equal("", calls["Partial.Host"].Choice.TargetService);
+        Assert.Equal("", calls["Self.Host"].Choice.TargetService);
+        Assert.Contains(analysis.Diagnostics, message => message.Contains("Different.Host") && message.Contains("Blue, Web"));
+
+        settings.Services.Add(new() { J2File = Write("UnrelatedFolder/appsettings.deploy.j2", "{}"), Label = "Duplicate", YamlService = "accounts-web-blue" });
+        var ambiguous = NetworkMapGenerator.Analyze(root, settings);
+        Assert.Equal("", ambiguous.Connections.Single(call => call.Path == "One.Host").Choice.TargetService);
+        Assert.Contains(ambiguous.Diagnostics, message => message.Contains("One.Host") && message.Contains("Blue, Duplicate"));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(null)]
+    public void SvcHostInferenceRecomputesAutomaticChoicesAndHonorsManualOverrides(string? clearedAddressVariables)
+    {
+        Write("params/application-prod.yml", "SVC_CALL_HOST: second-prod.example\n");
+        var caller = Write("Caller/appsettings.deploy.j2", """{"Api":{"Host":"{{ SVC_CALL_HOST }}"}}""");
+        var settings = new NetworkMapSettings
+        {
+            Environments = ["prod"],
+            Services =
+            [
+                new() { J2File = caller, Label = "Caller" },
+                new() { J2File = Write("First/appsettings.deploy.j2", "{}"), AddressVariables = "SVC_CALL_HOST" },
+                new() { J2File = Write("Second/appsettings.deploy.j2", "{}") }
+            ]
+        };
+        var root = Path.Combine(_root, "params");
+        NetworkChoice AnalyzeChoice() => NetworkMapGenerator.Analyze(root, settings).Connections.Single().Choice;
+        var first = settings.Services[1];
+        var second = settings.Services[2];
+        Assert.Equal(first.Id, AnalyzeChoice().TargetService);
+
+        first.AddressVariables = clearedAddressVariables;
+        Assert.Equal(second.Id, AnalyzeChoice().TargetService);
+        Write("params/application-prod.yml", "SVC_CALL_HOST: first-prod.example\n");
+        var choice = AnalyzeChoice();
+        Assert.Equal(first.Id, choice.TargetService);
+        choice.TargetReviewed = true;
+        choice.TargetService = second.Id;
+        first.AddressVariables = "SVC_CALL_HOST";
+        Assert.Equal(second.Id, AnalyzeChoice().TargetService);
+
+        choice.TargetService = "";
+        Assert.Equal("", AnalyzeChoice().TargetService);
+    }
+
+    [Fact]
     public void DefaultsExpansionIpv6MissingValuesAndCredentials()
     {
         Write("params/application.yml", "HOST: '{{ BASE }}'\nBASE: '[2001:db8::1]'\nLOOP_HOST: '{{ LOOP_HOST }}'\nEXTERNAL_URL: 'https://user:password@example.test/private?q=secret'\n");
@@ -262,8 +382,10 @@ public sealed class NetworkTests : IDisposable
     public void BasicTemplateGeneratesStandaloneMacroAndDiagramExportsSeparately()
     {
         Write("params/application.yml", "SVC_HOST: https://service.example\n");
+        Write("params/application-prod.yml", "SVC_HOST: https://prod.example:8443\n");
+        Write("params/application-demo.yml", "SVC_HOST: https://demo.example:9443\n");
         var main = Write("A/appsettings.deploy.j2", "{\"Client\":{\"Host\":\"{{ SVC_HOST }}\"}}");
-        var settings = new NetworkMapSettings { Environments = new() { "prod", "demo", "dev-2" }, Services = new()
+        var settings = new NetworkMapSettings { Environments = new() { "demo", "dev-2", "prod" }, Services = new()
         {
             new() { J2File = main, Label = "A", YamlService = "a" }
         }};
@@ -279,6 +401,8 @@ public sealed class NetworkTests : IDisposable
         Assert.Contains(@"worklog=365\|5\|8\|y w d h m\|y w d h m", parameters);
         Assert.Equal(new[] { "Элемент", "prod", "demo", "dev-2", "Параметры", "Сервисы", "Подключение", "Адресный параметр", "Блок", "Блок-родитель", "Подпись узла" },
             macro.Descendants("th").Select(th => th.InnerText));
+        Assert.Equal(new[] { "prod.example:8443", "demo.example:9443", "service.example:443 (порт по умолчанию)" },
+            Assert.Single(DataRows(macro)).Elements("td").Skip(1).Take(3).Select(td => td.InnerText));
         Assert.Equal(macro.OuterHtml, result.HtmlFragment);
         Assert.Equal("mxGraphModel", XDocument.Parse(NetworkMapGenerator.CreateDiagram(analysis)).Root!.Name.LocalName);
         var copied = CfHtml.Build(result.HtmlFragment);
@@ -286,6 +410,12 @@ public sealed class NetworkTests : IDisposable
         Assert.False(ClipboardTemplateProbe.LooksLikeTemplate(copied, includeNetwork: false));
         var regenerated = NetworkMapGenerator.RenderTable(copied, analysis);
         Assert.Equal(result.HtmlFragment, regenerated.HtmlFragment);
+
+        var withoutProd = NetworkMapGenerator.RenderTable(NetworkTableTemplates.BasicHtml, analysis with { Environments = ["dev-2", "demo"] });
+        var plainMacro = Transformer(withoutProd.HtmlFragment);
+        Assert.Equal(new[] { "Элемент", "dev-2", "demo", "Параметры" }, plainMacro.Descendants("th").Take(4).Select(th => th.InnerText));
+        Assert.Contains("sql=SELECT T1.'Элемент', T1.'dev-2', T1.'demo' FROM T1|",
+            WebUtility.HtmlDecode(plainMacro.GetAttributeValue("data-macro-parameters", "")));
     }
 
     [Fact]

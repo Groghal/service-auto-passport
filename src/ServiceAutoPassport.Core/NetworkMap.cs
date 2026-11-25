@@ -1,4 +1,5 @@
 using System.Data.Common;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -13,7 +14,7 @@ public sealed class NetworkServiceInput
     public string Block { get; set; } = NetworkTargetSettings.DefaultBlock;
     public string? ParentBlock { get; set; }
     public string YamlService { get; set; } = "";
-    public string AddressVariables { get; set; } = "";
+    public string? AddressVariables { get; set; } = "";
     public string Id => NetworkMapGenerator.Id(Path.GetFullPath(J2File));
 }
 public sealed class NetworkChoice
@@ -114,6 +115,8 @@ public sealed record NetworkTableResult(string HtmlFragment, string PlainText);
 
 public static class NetworkMapGenerator
 {
+    private sealed record ServiceHostName(string Name, string ServiceId, string Label);
+
     internal static string Id(string text) => "n" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)))[..16];
     private static readonly Regex Placeholder = J2Variables.PlaceholderRegex();
     private static readonly Regex EndpointName = new(@"(hosts?|urls?|uris?|endpoints?|bootstrapservers|servers)$", RegexOptions.IgnoreCase);
@@ -133,15 +136,22 @@ public static class NetworkMapGenerator
         var aliases = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var service in settings.Services)
         {
+            if (string.IsNullOrWhiteSpace(service.Label)) service.Label = DeploymentName(service);
             foreach (var alias in Split(service.AddressVariables))
                 if (!aliases.TryAdd(alias, service.Id)) throw new InvalidDataException($"Адресная переменная назначена нескольким сервисам: {alias}");
         }
+        var serviceIds = settings.Services.Select(service => service.Id).ToHashSet(StringComparer.Ordinal);
+        var hostNames = settings.Services.SelectMany(service => new[] { DeploymentName(service), NormalizeName(service.YamlService) }
+                .Where(name => name.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase)
+                .Select(name => new ServiceHostName(name, service.Id, service.Label)))
+            .OrderByDescending(name => name.Name.Length).ToArray();
         foreach (var service in settings.Services)
         {
-            if (string.IsNullOrWhiteSpace(service.Label)) service.Label = ServiceComponent.DeploymentName(Path.GetDirectoryName(service.J2File)!);
             var config = ServiceConfiguration.Read(service.J2File)
                 .ToDictionary(pair => pair.Key, pair => pair.Value.Value, StringComparer.OrdinalIgnoreCase);
             var envs = settings.Environments.ToDictionary(e => e, e => YamlConfiguration.LoadForEnvironment(root, service.YamlService, e));
+            var prod = new Lazy<IReadOnlyDictionary<string, string?>>(() =>
+                envs.GetValueOrDefault("prod") ?? YamlConfiguration.LoadForEnvironment(root, service.YamlService, "prod"));
             foreach (var pair in config)
             {
                 var path = pair.Key;
@@ -199,12 +209,17 @@ public static class NetworkMapGenerator
                 {
                     Service = service, Path = path, Host = host, Port = port, UrlPathKeys = urlPathKeys, Choice = choice, ExternalTarget = target
                 };
-                if (choice.TargetService.Length > 0 && !settings.Services.Any(s => s.Id == choice.TargetService)) choice.TargetService = "";
-                if (choice.TargetService.Length == 0 && !choice.TargetReviewed)
+                if (choice.TargetReviewed)
+                {
+                    if (choice.TargetService.Length > 0 && !serviceIds.Contains(choice.TargetService)) choice.TargetService = "";
+                }
+                else
                 {
                     var owners = hostKeys.Where(aliases.ContainsKey).Select(k => aliases[k]).Distinct().ToArray();
-                    if (owners.Length == 1) choice.TargetService = owners[0];
                     if (owners.Length > 1) throw new InvalidDataException(service.Label + ": неоднозначный целевой сервис для " + path);
+                    choice.TargetService = owners.SingleOrDefault() ??
+                        (serviceIds.Count > 1 && hostKeys.Any(key => key.StartsWith("SVC_", StringComparison.Ordinal))
+                            ? FindProductionTarget(connection, prod, hostNames, diagnostics) : "");
                 }
                 foreach (var env in envs) connection.Values[env.Key] = env.Value;
                 connections.Add(connection);
@@ -221,6 +236,47 @@ public static class NetworkMapGenerator
                     diagnostics.Add(env + ": адреса общего узла различаются у подключений " + string.Join(", ", group.Select(c => c.Service.Label + " — " + c.Path)));
         return analysis;
     }
+
+    private static string DeploymentName(NetworkServiceInput service) =>
+        ServiceComponent.DeploymentName(Path.GetDirectoryName(Path.GetFullPath(service.J2File))!);
+
+    private static string NormalizeName(string name) => name.Trim().Replace('_', '-').Replace('.', '-');
+
+    private static string FindProductionTarget(NetworkConnection connection, Lazy<IReadOnlyDictionary<string, string?>> prod,
+        ServiceHostName[] hostNames, List<string> diagnostics)
+    {
+        string resolved;
+        try { resolved = J2Variables.Expand(connection.Host, prod.Value); }
+        catch (InvalidDataException) { return ""; }
+        if (TryDatabase(resolved, out var dbHost, out _)) resolved = dbHost;
+
+        var owners = new Dictionary<string, string>(StringComparer.Ordinal);
+        var unmatched = false;
+        foreach (var address in resolved.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (ParseAddress(address) is not { } endpoint || IPAddress.TryParse(endpoint.Host.Trim('[', ']'), out _))
+            {
+                unmatched = true;
+                continue;
+            }
+            var host = NormalizeName(endpoint.Host.Split('.', 2)[0]);
+            var matches = hostNames.Where(name => host.StartsWith(name.Name, StringComparison.OrdinalIgnoreCase) &&
+                (host.Length == name.Name.Length || !char.IsLetter(host[name.Name.Length]))).ToArray();
+            if (matches.Length == 0)
+            {
+                unmatched = true;
+                continue;
+            }
+            var longest = matches[0].Name.Length;
+            foreach (var match in matches.TakeWhile(name => name.Name.Length == longest)) owners[match.ServiceId] = match.Label;
+        }
+        if (owners.Count > 1)
+            diagnostics.Add($"{connection.Service.Label}. {connection.Path} — неоднозначная цель в prod ({string.Join(", ", owners.Values.Order(StringComparer.Ordinal))}). Выберите целевой сервис.");
+        if (unmatched || owners.Count != 1) return "";
+        var target = owners.Keys.Single();
+        return target == connection.Service.Id ? "" : target;
+    }
+
     private static bool TryDatabase(string value, out string host, out string port)
     {
         host = port = "";
@@ -240,7 +296,8 @@ public static class NetworkMapGenerator
         catch (ArgumentException) { return false; }
     }
 
-    public static string[] Split(string value) => value.Split(new[] { ',', ';', ' ', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    public static string[] Split(string? value) =>
+        value?.Split([',', ';', ' ', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) ?? [];
     private static string? SchemeProtocol(string scheme) => scheme.ToLowerInvariant() switch
     {
         "http" => "HTTP", "https" => "HTTPS", "grpc" => "gRPC", "grpcs" => "gRPC TLS",

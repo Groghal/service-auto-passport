@@ -46,7 +46,8 @@ internal static class NetworkTableTransformer
         IReadOnlyDictionary<string, string> blockParents, IReadOnlySet<string> sharedContainers)
     {
         var (macro, table) = template;
-        var visible = new[] { FirstColumn }.Concat(environments).ToArray();
+        var tableEnvironments = environments.OrderByDescending(env => env.Equals("prod", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var visible = new[] { FirstColumn }.Concat(tableEnvironments).ToArray();
         var columns = visible.Concat(new[] { ParametersColumn, "Сервисы", "Подключение", AddressColumn, BlockColumn, ParentBlockColumn, NodeLabelColumn });
         var html = new StringBuilder("<tbody><tr>");
         foreach (var column in columns) AppendCell(html, "th", column);
@@ -60,7 +61,7 @@ internal static class NetworkTableTransformer
                 !container.Equals(NetworkTargetSettings.DefaultBlock, StringComparison.OrdinalIgnoreCase) && !sharedContainers.Contains(container);
             html.Append("<tr>");
             AppendCell(html, "td", useContainerName ? container : vertex.Label);
-            foreach (var env in environments) AppendCell(html, "td", Endpoints(target.Connections, env));
+            foreach (var env in tableEnvironments) AppendCell(html, "td", Endpoints(target.Connections, env));
             AppendCell(html, "td", string.Join(", ", target.Connections.SelectMany(c => c.ParameterKeys).Distinct(StringComparer.Ordinal)));
             AppendCell(html, "td", string.Join("\n", target.Connections.Select(c => c.Service.Label).Distinct()));
             AppendCell(html, "td", string.Join("\n", target.Connections.Select(c => c.Service.Label + " — " + c.Path)));

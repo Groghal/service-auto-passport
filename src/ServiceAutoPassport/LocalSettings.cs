@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using ServiceAutoPassport.Core;
 
 namespace ServiceAutoPassport;
@@ -17,7 +18,8 @@ internal sealed class LocalSettings
     public string? NetworkAppParamsRoot { get; set; }
     public string AppParamsRoot { get; set; } = "";
     public string ServiceFolder { get; set; } = "";
-    public string SelectedService { get; set; } = "";
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? SelectedService { get; set; }
     public string SelectedTemplate { get; set; } = "";
     public string DefaultTemplateHtml { get; set; } = "";
     public Dictionary<string, ServiceIdentity> Services { get; set; } = new(StringComparer.Ordinal);
@@ -48,11 +50,30 @@ internal sealed class LocalSettings
             settings.Services ??= new Dictionary<string, ServiceIdentity>(StringComparer.Ordinal);
             settings.KeyDescriptions ??= new Dictionary<string, string>(StringComparer.Ordinal);
             settings.HtmlDescriptionKeys ??= new HashSet<string>(StringComparer.Ordinal);
+            settings.MigratePassportIdentity();
             return settings;
         }
         catch (JsonException error)
         {
             throw new InvalidDataException($"Не удалось прочитать локальные настройки: {path}", error);
+        }
+    }
+
+    private void MigratePassportIdentity()
+    {
+        var previousName = SelectedService?.Trim();
+        SelectedService = null;
+        if (string.IsNullOrEmpty(previousName) || string.IsNullOrWhiteSpace(ServiceFolder) ||
+            !Services.TryGetValue(previousName, out var identity)) return;
+
+        try
+        {
+            var name = ServiceComponent.DeploymentName(ServiceFolder.Trim());
+            if (name.Length > 0) Services.TryAdd(name, identity);
+        }
+        catch (Exception error) when (error is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            // An invalid saved folder does not identify a profile to migrate.
         }
     }
 
