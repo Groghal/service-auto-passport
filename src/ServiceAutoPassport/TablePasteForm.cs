@@ -11,6 +11,7 @@ internal sealed class TablePasteForm<T> : Form where T : class
         Multiline = true,
         AcceptsReturn = true,
         AcceptsTab = true,
+        MaxLength = int.MaxValue,
         ScrollBars = ScrollBars.Both,
         WordWrap = false,
         Font = new Font("Consolas", 10F)

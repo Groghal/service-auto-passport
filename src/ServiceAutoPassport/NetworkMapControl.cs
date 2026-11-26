@@ -246,7 +246,7 @@ internal sealed class NetworkMapControl : UserControl
     private void EditNetworkParameters()
     {
         var analysis = _analysis;
-        using var dialog = new NetworkParametersForm(_settings.Network.Targets, analysis?.Connections ?? [],
+        using var dialog = new NetworkParametersForm(_settings.Network.Targets, analysis?.Connections ?? [], _services.ToArray(),
             entries => NetworkParameterCatalog.SaveCatalog(_settings.Network, entries, analysis, _settings.Save),
             draft => NetworkTemplatePrefill.ReadFirstWithRows(PrefillSources(), analysis?.Connections ?? [], draft));
         if (dialog.ShowDialog(this) == DialogResult.OK)

@@ -43,7 +43,8 @@ internal sealed class MainForm : Form
     private readonly Button _saveTemplate = new() { Text = "Сохранить буфер как шаблон", Dock = DockStyle.Fill };
     private readonly Button _editKeyDescriptions = new() { Text = "Описания ключей…", Dock = DockStyle.Fill };
     private readonly Button _generateCurrent = new() { Text = "Заполнить шаблон из буфера", Dock = DockStyle.Fill };
-    private readonly Button _generateFromDefault = new() { Text = "Сохранённый шаблон + буфер", Dock = DockStyle.Fill };
+    private readonly Button _generateFromDefault = new() { Text = "Заполнить сохранённый шаблон", Dock = DockStyle.Fill };
+    private readonly Button _generateMerged = new() { Text = "Сохранённый шаблон + буфер", Dock = DockStyle.Fill };
 
     private string? _activeService;
     private string? _activeServiceFolder;
@@ -71,8 +72,8 @@ internal sealed class MainForm : Form
         SetClipboardIndicator("Проверяем буфер обмена…", Color.DimGray);
         _status.Text = string.IsNullOrWhiteSpace(_settings.DefaultTemplateHtml)
             ? "Шаблон по умолчанию не сохранён. Скопируйте полную страницу из Confluence."
-            : "Шаблон по умолчанию сохранён. Можно заполнить его значениями из буфера.";
-        _generateFromDefault.Enabled = !string.IsNullOrWhiteSpace(_settings.DefaultTemplateHtml);
+            : "Шаблон по умолчанию сохранён.";
+        UpdateGenerationButtons();
         _appParamsRoot.Text = _settings.AppParamsRoot;
         _serviceFolder.Text = _settings.ServiceFolder;
         _service.Leave += (_, _) => TryRefresh(RefreshDomainApiVariables);
@@ -80,8 +81,9 @@ internal sealed class MainForm : Form
         _serviceFolder.Leave += (_, _) => TryRefresh(RefreshForServiceFolder);
         _saveTemplate.Click += SaveDefaultTemplate;
         _editKeyDescriptions.Click += EditKeyDescriptions;
-        _generateCurrent.Click += (_, _) => GeneratePassport(useDefaultTemplate: false);
-        _generateFromDefault.Click += (_, _) => GeneratePassport(useDefaultTemplate: true);
+        _generateCurrent.Click += (_, _) => GeneratePassport(PassportTemplateSource.Clipboard);
+        _generateFromDefault.Click += (_, _) => GeneratePassport(PassportTemplateSource.Saved);
+        _generateMerged.Click += (_, _) => GeneratePassport(PassportTemplateSource.SavedWithClipboard);
         _clipboardTimer.Tick += (_, _) => { RefreshClipboardIndicator(); _network.RefreshClipboardIndicator(); };
         Shown += (_, _) =>
         {
@@ -174,14 +176,14 @@ internal sealed class MainForm : Form
         descriptions.Controls.Add(_editKeyDescriptions, 1, 0);
         root.Controls.Add(descriptions, 0, 3);
 
-        var actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1 };
-        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33));
-        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 34));
-        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33));
+        var actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 1 };
+        for (var i = 0; i < actions.ColumnCount; i++)
+            actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
         actions.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         actions.Controls.Add(_saveTemplate, 0, 0);
         actions.Controls.Add(_generateCurrent, 1, 0);
         actions.Controls.Add(_generateFromDefault, 2, 0);
+        actions.Controls.Add(_generateMerged, 3, 0);
         root.Controls.Add(actions, 0, 4);
         _status.AutoEllipsis = true;
         root.Controls.Add(_status, 0, 5);
@@ -377,7 +379,7 @@ internal sealed class MainForm : Form
             var html = WindowsClipboard.ReadHtmlOnce();
             if (html == _generatedClipboardHtml)
             {
-                SetClipboardIndicator("В буфере готовый паспорт. Для нового запуска скопируйте исходный шаблон.",
+                SetClipboardIndicator("В буфере готовый паспорт.",
                     Color.DarkGoldenrod);
                 return;
             }
@@ -393,7 +395,7 @@ internal sealed class MainForm : Form
         catch (InvalidDataException)
         {
             _lastCheckedClipboardHtml = null;
-            SetClipboardIndicator("В буфере нет подходящего HTML. Скопируйте шаблон из Confluence.", Color.Firebrick);
+            SetClipboardIndicator("В буфере нет HTML-шаблона.", Color.Firebrick);
         }
         catch (ExternalException)
         {
@@ -424,7 +426,7 @@ internal sealed class MainForm : Form
             TemplateValueMerger.ValidateFullTemplate(html);
             _settings.DefaultTemplateHtml = html;
             SaveSettings();
-            _generateFromDefault.Enabled = true;
+            UpdateGenerationButtons();
             _status.Text = "Шаблон по умолчанию сохранён в локальных настройках.";
         }
         catch (Exception error)
@@ -435,11 +437,16 @@ internal sealed class MainForm : Form
         }
     }
 
-    private void GeneratePassport(bool useDefaultTemplate)
+    private void UpdateGenerationButtons(bool busy = false)
     {
-        _generateCurrent.Enabled = false;
-        _generateFromDefault.Enabled = false;
-        _saveTemplate.Enabled = false;
+        _generateCurrent.Enabled = _saveTemplate.Enabled = !busy;
+        _generateFromDefault.Enabled = _generateMerged.Enabled =
+            !busy && !string.IsNullOrWhiteSpace(_settings.DefaultTemplateHtml);
+    }
+
+    private void GeneratePassport(PassportTemplateSource templateSource)
+    {
+        UpdateGenerationButtons(busy: true);
         UseWaitCursor = true;
         try
         {
@@ -451,14 +458,8 @@ internal sealed class MainForm : Form
                 throw new InvalidDataException("Укажите имя сервиса или выберите папку сервиса.");
             var template = _template.SelectedItem as string;
             var j2File = template is null or WithoutJ2 ? null : Path.Combine(serviceFolder, template);
-            var clipboardHtml = WindowsClipboard.ReadHtml();
-            if (!useDefaultTemplate && clipboardHtml == _generatedClipboardHtml)
-                throw new InvalidDataException("В буфере готовый паспорт. Скопируйте исходную страницу шаблона.");
-            if (useDefaultTemplate && string.IsNullOrWhiteSpace(_settings.DefaultTemplateHtml))
-                throw new InvalidDataException("Сначала сохраните полную страницу как шаблон по умолчанию.");
-            var source = useDefaultTemplate
-                ? TemplateValueMerger.Merge(_settings.DefaultTemplateHtml, clipboardHtml)
-                : clipboardHtml;
+            var source = TemplateValueMerger.SelectSource(templateSource, _settings.DefaultTemplateHtml,
+                WindowsClipboard.ReadHtml, _generatedClipboardHtml);
             var options = new PassportOptions(service, appParamsRoot, j2File,
                 _displayName.Text.Trim(), _team.Text.Trim(), _settings.KeyDescriptions,
                 _displayNamePriority.Checked, _teamPriority.Checked, _settings.HtmlDescriptionKeys,
@@ -469,7 +470,7 @@ internal sealed class MainForm : Form
             WindowsClipboard.Write(generatedHtml, result.PlainText);
             _generatedClipboardHtml = generatedHtml;
             _lastCheckedClipboardHtml = generatedHtml;
-            SetClipboardIndicator("В буфере готовый паспорт. Для нового запуска скопируйте исходный шаблон.",
+            SetClipboardIndicator("В буфере готовый паспорт.",
                 Color.DarkGoldenrod);
             _status.Text = "Паспорт скопирован. Вставьте его в редактор Confluence.";
             try { SaveSettings(); }
@@ -487,9 +488,7 @@ internal sealed class MainForm : Form
         finally
         {
             UseWaitCursor = false;
-            _generateCurrent.Enabled = true;
-            _generateFromDefault.Enabled = !string.IsNullOrWhiteSpace(_settings.DefaultTemplateHtml);
-            _saveTemplate.Enabled = true;
+            UpdateGenerationButtons();
         }
     }
 

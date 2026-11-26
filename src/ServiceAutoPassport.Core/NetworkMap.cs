@@ -32,6 +32,8 @@ public sealed class NetworkTargetSettings
     public string? ParentBlock { get; set; }
     public bool LabelIsAutomatic { get; set; }
     public bool BlockIsAutomatic { get; set; }
+    public string? SourceJ2 { get; set; }
+    public bool AwaitingConnection { get; set; }
     public string? SourceService { get; set; }
     public string? UrlPathParameters { get; set; }
 }
@@ -133,6 +135,7 @@ public static class NetworkMapGenerator
             throw new InvalidDataException("Укажите уникальные имена окружений без пробелов и разделителей пути.");
         var diagnostics = new List<string>();
         var connections = new List<NetworkConnection>();
+        var existingTargets = settings.Targets.Keys.ToHashSet(StringComparer.Ordinal);
         var aliases = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var service in settings.Services)
         {
@@ -202,6 +205,8 @@ public static class NetworkMapGenerator
                     };
                 if (hostKeys.Count == 0)
                 {
+                    target.SourceJ2 = NetworkParameterCatalog.ServiceJ2(service.J2File);
+                    target.AwaitingConnection = false;
                     target.SourceService = service.Label;
                     target.UrlPathParameters = string.Join(", ", urlPathKeys);
                 }
@@ -225,6 +230,7 @@ public static class NetworkMapGenerator
                 connections.Add(connection);
             }
         }
+        NetworkParameterCatalog.ApplyUnmatchedEntries(settings.Targets, existingTargets, connections, diagnostics);
         foreach (var group in connections.GroupBy(c => c.ExternalTarget))
             if (string.IsNullOrWhiteSpace(group.Key.Label))
                 group.Key.Label = group.OrderBy(c => c.Path, StringComparer.Ordinal).First().SuggestedTargetLabel;

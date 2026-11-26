@@ -1,7 +1,38 @@
 namespace ServiceAutoPassport.Core;
 
+public sealed record KeyDescriptionEntry(string Description, bool IsHtml);
+
 public static class KeyDescriptionImport
 {
+    private static readonly string[] TransferHeader = ["Ключ из J2", "Описание", "HTML"];
+
+    public static string Export(IReadOnlyDictionary<string, KeyDescriptionEntry> entries) =>
+        TabSeparatedTable.Write(new[] { TransferHeader }.Concat(entries.Select(pair =>
+            new[] { pair.Key, pair.Value.Description, TabSeparatedTable.WriteFlag(pair.Value.IsHtml) })));
+
+    public static IReadOnlyDictionary<string, KeyDescriptionEntry> ParseEntries(string text)
+    {
+        if (!TabSeparatedTable.HasHeader(text, TransferHeader))
+            return Parse(text).ToDictionary(pair => pair.Key,
+                pair => new KeyDescriptionEntry(pair.Value, DescriptionHtml.LooksLikeMarkup(pair.Value)), StringComparer.Ordinal);
+
+        var entries = new Dictionary<string, KeyDescriptionEntry>(StringComparer.Ordinal);
+        foreach (var (number, cells) in TabSeparatedTable.Read(text.TrimStart('\uFEFF')).Skip(1))
+        {
+            if (cells.Length != TransferHeader.Length)
+                throw new InvalidDataException($"Строка {number}: нужны колонки «Ключ из J2», «Описание» и «HTML».");
+            var key = cells[0].Trim();
+            var description = cells[1].Trim();
+            if (key.Length == 0 || description.Length == 0)
+                throw new InvalidDataException($"Строка {number}: нужны ключ и непустое описание.");
+            var entry = new KeyDescriptionEntry(description, TabSeparatedTable.ReadFlag(cells[2], number, "HTML"));
+            if (!entries.TryAdd(key, entry))
+                throw new InvalidDataException($"Строка {number}: ключ «{key}» уже встречался выше.");
+        }
+        if (entries.Count == 0) throw new InvalidDataException("Нет пар «ключ — описание» для импорта.");
+        return entries;
+    }
+
     public static IReadOnlyDictionary<string, string> Parse(string text)
     {
         ArgumentNullException.ThrowIfNull(text);

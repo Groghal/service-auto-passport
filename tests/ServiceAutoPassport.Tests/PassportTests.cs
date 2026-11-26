@@ -32,6 +32,30 @@ public sealed class PassportTests
         Assert.False(ClipboardTemplateProbe.LooksLikeTemplate("plain text"));
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("Текст в буфере")]
+    public void SavedTemplateFillsPassportWithoutReadingClipboard(string clipboardText)
+    {
+        using var fixture = new Fixture();
+        fixture.Write("app-params/.git/config", "[remote \"origin\"]\nurl = git@gitlab.example:team/app-params.git\n");
+        fixture.Write("component/.git/config", "[remote \"origin\"]\nurl = git@gitlab.example:team/component.git\n");
+        fixture.Write("app-params/application.yml", "deploy_num: 7\nnamespace: test-saved\n");
+        fixture.Write("component/demo/appsettings.deploy.j2", "{{ CUSTOM_KEY }}");
+        var saved = CfHtml.Build(TestTemplate.FullPage);
+        var source = TemplateValueMerger.SelectSource(PassportTemplateSource.Saved, saved,
+            () => throw new InvalidOperationException("Попытка прочитать буфер: " + clipboardText), null);
+        var result = PassportGenerator.Generate(source, new PassportOptions(
+            "demo", fixture.PathTo("app-params"), fixture.PathTo("component/demo/appsettings.deploy.j2")));
+
+        var document = new HtmlDocument();
+        document.LoadHtml(result.HtmlFragment);
+        var podRow = document.DocumentNode.Descendants("tr").Single(row => Cell(row, 0) == "Количество Pod");
+        Assert.Equal("7", Cell(podRow, 2));
+        Assert.Contains("test-saved", result.PlainText);
+        Assert.Contains("CUSTOM_KEY", result.PlainText);
+    }
+
     [Fact]
     public void SavedTemplateMergesClipboardValuesBeforeYamlAndJ2()
     {
@@ -71,7 +95,8 @@ public sealed class PassportTests
         Assert.Contains("Старое имя", CfHtml.ExtractFragment(restoredCard));
         Assert.Contains("data-macro-name=\"table-excerpt\"", CfHtml.ExtractFragment(restoredCard));
 
-        var merged = TemplateValueMerger.Merge(savedTemplate, CfHtml.Build(edited.DocumentNode.InnerHtml));
+        var merged = TemplateValueMerger.SelectSource(PassportTemplateSource.SavedWithClipboard, savedTemplate,
+            () => CfHtml.Build(edited.DocumentNode.InnerHtml), null);
         var mergedDocument = new HtmlDocument();
         mergedDocument.LoadHtml(CfHtml.ExtractFragment(merged));
         Assert.Contains("S3_TEST_URL", mergedDocument.DocumentNode.Descendants("table").ElementAt(2).InnerText);

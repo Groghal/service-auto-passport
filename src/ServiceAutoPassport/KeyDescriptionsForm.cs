@@ -72,6 +72,13 @@ internal sealed class KeyDescriptionsForm : Form
         };
         var paste = new Button { Text = "Вставить из Excel…", AutoSize = true };
         paste.Click += (_, _) => ImportDescriptions();
+        var copy = new Button { Text = "Скопировать все строки", AutoSize = true };
+        copy.Click += (_, _) =>
+        {
+            var entries = ReadDescriptions();
+            if (entries is not null)
+                TableClipboard.Copy(this, _hint, () => KeyDescriptionImport.Export(entries), entries.Count);
+        };
         var editHtml = new Button { Text = "Редактор HTML…", AutoSize = true };
         editHtml.Click += (_, _) => EditSelectedHtml();
         var save = new Button { Text = "Сохранить", AutoSize = true };
@@ -89,6 +96,7 @@ internal sealed class KeyDescriptionsForm : Form
         actions.Controls.Add(delete);
         actions.Controls.Add(add);
         actions.Controls.Add(paste);
+        actions.Controls.Add(copy);
         actions.Controls.Add(editHtml);
 
         var layout = new TableLayoutPanel
@@ -111,19 +119,18 @@ internal sealed class KeyDescriptionsForm : Form
 
     private void ImportDescriptions()
     {
-        using var dialog = new TablePasteForm<IReadOnlyDictionary<string, string>>("Вставить описания из Excel",
-            "Скопируйте в Excel ключ и описание и вставьте их сюда (Ctrl+V). " +
-            "Между ключом и описанием можно поставить табуляцию или пробел.",
-            "Добавить пары", KeyDescriptionImport.Parse);
+        using var dialog = new TablePasteForm<IReadOnlyDictionary<string, KeyDescriptionEntry>>("Вставить описания из Excel",
+            "Вставьте экспорт приложения или пары «ключ — описание» из Excel (Ctrl+V). " +
+            "Для пар подойдёт табуляция или пробел.",
+            "Импортировать", KeyDescriptionImport.ParseEntries);
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
-        _grid.EndEdit();
-        var imported = dialog.Result!.Select(pair =>
-            (pair.Key, pair.Value, IsHtml: DescriptionHtml.LooksLikeMarkup(pair.Value))).ToArray();
+        if (!_grid.EndEdit()) return;
+        var imported = dialog.Result!;
         try
         {
-            foreach (var entry in imported.Where(entry => entry.IsHtml))
-                DescriptionHtml.Normalize(entry.Value);
+            foreach (var entry in imported.Values.Where(entry => entry.IsHtml))
+                DescriptionHtml.Normalize(entry.Description);
         }
         catch (InvalidDataException error)
         {
@@ -132,23 +139,30 @@ internal sealed class KeyDescriptionsForm : Form
             return;
         }
 
+        var existing = _grid.Rows.Cast<DataGridViewRow>().Where(row => !row.IsNewRow)
+            .ToLookup(row => row.Cells[0].Value?.ToString()?.Trim() ?? "", StringComparer.Ordinal);
+        var changes = SettingsTableImport.SelectChanges(imported, existing.Contains, count => TableClipboard.ReplaceMatches(this, count));
+        if (changes is null) return;
+
+        var added = 0;
         var updated = 0;
-        foreach (var entry in imported)
+        foreach (var (key, entry) in changes)
         {
-            var existing = _grid.Rows.Cast<DataGridViewRow>().FirstOrDefault(row =>
-                !row.IsNewRow && string.Equals(row.Cells[0].Value?.ToString()?.Trim(),
-                    entry.Key, StringComparison.Ordinal));
-            if (existing is null)
-                _grid.Rows.Add(entry.Key, entry.Value, entry.IsHtml);
+            var row = existing[key].FirstOrDefault();
+            if (row is null)
+            {
+                _grid.Rows.Add(key, entry.Description, entry.IsHtml);
+                added++;
+            }
             else
             {
-                existing.Cells[1].Value = entry.Value;
-                existing.Cells[2].Value = entry.IsHtml;
+                row.Cells[1].Value = entry.Description;
+                row.Cells[2].Value = entry.IsHtml;
                 updated++;
             }
         }
 
-        _hint.Text = $"Добавлено: {imported.Length - updated}. Обновлено: {updated}. " +
+        _hint.Text = $"Добавлено: {added}. Обновлено: {updated}. " +
                      "Нажмите «Сохранить», чтобы записать настройки.";
     }
 
@@ -169,11 +183,10 @@ internal sealed class KeyDescriptionsForm : Form
         row.Cells[2].Value = true;
     }
 
-    private void SaveDescriptions()
+    private Dictionary<string, KeyDescriptionEntry>? ReadDescriptions()
     {
-        _grid.EndEdit();
-        var result = new Dictionary<string, string>(StringComparer.Ordinal);
-        var htmlKeys = new HashSet<string>(StringComparer.Ordinal);
+        if (!_grid.EndEdit()) return null;
+        var result = new Dictionary<string, KeyDescriptionEntry>(StringComparer.Ordinal);
         foreach (DataGridViewRow row in _grid.Rows)
         {
             if (row.IsNewRow) continue;
@@ -184,31 +197,38 @@ internal sealed class KeyDescriptionsForm : Form
             {
                 MessageBox.Show(this, "У каждой пары должны быть ключ и описание.",
                     "Проверьте строку", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
+                return null;
             }
 
-            if (!result.TryAdd(key, description))
+            if (result.ContainsKey(key))
             {
                 MessageBox.Show(this, $"Ключ «{key}» указан несколько раз.",
                     "Проверьте ключи", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
+                return null;
             }
 
-            if (row.Cells[2].Value is true)
+            var isHtml = row.Cells[2].Value is true;
+            if (isHtml)
             {
-                try { result[key] = DescriptionHtml.Normalize(description); }
+                try { description = DescriptionHtml.Normalize(description); }
                 catch (InvalidDataException error)
                 {
                     MessageBox.Show(this, $"Ключ «{key}»: {error.Message}",
                         "Проверьте HTML", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
+                    return null;
                 }
-                htmlKeys.Add(key);
             }
+            result.Add(key, new KeyDescriptionEntry(description, isHtml));
         }
+        return result;
+    }
 
-        Descriptions = result;
-        HtmlKeys = htmlKeys;
+    private void SaveDescriptions()
+    {
+        var entries = ReadDescriptions();
+        if (entries is null) return;
+        Descriptions = entries.ToDictionary(pair => pair.Key, pair => pair.Value.Description, StringComparer.Ordinal);
+        HtmlKeys = entries.Where(pair => pair.Value.IsHtml).Select(pair => pair.Key).ToHashSet(StringComparer.Ordinal);
         DialogResult = DialogResult.OK;
         Close();
     }

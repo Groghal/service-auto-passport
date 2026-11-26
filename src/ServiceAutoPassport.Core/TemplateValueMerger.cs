@@ -3,8 +3,28 @@ using HtmlAgilityPack;
 
 namespace ServiceAutoPassport.Core;
 
+public enum PassportTemplateSource { Clipboard, Saved, SavedWithClipboard }
+
 public static class TemplateValueMerger
 {
+    public static string SelectSource(PassportTemplateSource source, string savedTemplateHtml,
+        Func<string> readClipboardHtml, string? generatedClipboardHtml)
+    {
+        if (source == PassportTemplateSource.Clipboard)
+        {
+            var html = readClipboardHtml();
+            if (html == generatedClipboardHtml)
+                throw new InvalidDataException("В буфере готовый паспорт. Скопируйте исходную страницу шаблона.");
+            return html;
+        }
+
+        if (string.IsNullOrWhiteSpace(savedTemplateHtml))
+            throw new InvalidDataException("Сначала сохраните полную страницу как шаблон по умолчанию.");
+        return source == PassportTemplateSource.SavedWithClipboard
+            ? Merge(savedTemplateHtml, readClipboardHtml())
+            : savedTemplateHtml;
+    }
+
     public static void ValidateFullTemplate(string clipboardHtml)
     {
         var document = Parse(clipboardHtml);

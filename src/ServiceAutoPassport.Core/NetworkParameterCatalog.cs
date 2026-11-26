@@ -8,9 +8,12 @@ public sealed record NetworkParameterEdit(string Label, string Block)
     public string? ParentBlock { get; init; }
     public bool LabelIsAutomatic { get; init; }
     public bool BlockIsAutomatic { get; init; }
+    public NetworkParameterSource? Source { get; init; }
 }
 
-public static class NetworkParameterCatalog
+public sealed record NetworkParameterSource(string? J2, string? Service, string? PathVariables, bool AwaitingConnection = false);
+
+public static partial class NetworkParameterCatalog
 {
     private const string AddressPrefix = "parameter:";
     private const string LiteralPrefix = "literal:";
@@ -29,7 +32,7 @@ public static class NetworkParameterCatalog
 
     internal static bool IsLiteralKey(string key) => key.StartsWith(LiteralPrefix, StringComparison.Ordinal);
 
-    public static string DisplayParameter(string key, NetworkTargetSettings settings)
+    public static string DisplayParameter(string key, NetworkTargetSettings settings, NetworkParameterSource? source = null)
     {
         if (key.StartsWith(AddressPrefix, StringComparison.Ordinal))
             return key[AddressPrefix.Length..].Replace("|", ", ", StringComparison.Ordinal);
@@ -37,7 +40,8 @@ public static class NetworkParameterCatalog
 
         var context = key[LiteralPrefix.Length..].Split(':', 2);
         return context.Length == 2
-            ? $"{settings.UrlPathParameters ?? "Без переменной"} — {settings.SourceService ?? context[0]} · {context[1]}"
+            ? $"{source?.PathVariables ?? settings.UrlPathParameters ?? "Без переменной"} — " +
+              $"{source?.Service ?? settings.SourceService ?? context[0]} · {context[1]}"
             : key;
     }
 
@@ -141,9 +145,12 @@ public static class NetworkParameterCatalog
             var previous = FindTarget(key);
             staged[key] = new NetworkTargetSettings
             {
-                Label = edit.Label, Block = edit.Block, ParentBlock = edit.ParentBlock, SourceService = previous?.SourceService,
-                UrlPathParameters = previous?.UrlPathParameters,
-                LabelIsAutomatic = edit.LabelIsAutomatic, BlockIsAutomatic = edit.BlockIsAutomatic
+                Label = edit.Label, Block = edit.Block, ParentBlock = edit.ParentBlock,
+                LabelIsAutomatic = edit.LabelIsAutomatic, BlockIsAutomatic = edit.BlockIsAutomatic,
+                SourceJ2 = previous?.SourceJ2 ?? edit.Source?.J2,
+                AwaitingConnection = previous?.AwaitingConnection ?? edit.Source?.AwaitingConnection ?? false,
+                SourceService = previous?.SourceService ?? edit.Source?.Service,
+                UrlPathParameters = previous?.UrlPathParameters ?? edit.Source?.PathVariables
             };
         }
 
@@ -156,15 +163,16 @@ public static class NetworkParameterCatalog
         }
 
         // The active analysis holds references to these settings.
-        foreach (var (key, edit) in edits)
+        foreach (var key in edits.Keys)
         {
             var existing = FindTarget(key);
             if (existing is null) continue;
-            existing.Label = edit.Label;
-            existing.Block = edit.Block;
-            existing.ParentBlock = edit.ParentBlock;
-            existing.LabelIsAutomatic = edit.LabelIsAutomatic;
-            existing.BlockIsAutomatic = edit.BlockIsAutomatic;
+            var entry = staged[key];
+            CopyLabels(entry, existing);
+            existing.SourceJ2 = entry.SourceJ2;
+            existing.AwaitingConnection = entry.AwaitingConnection;
+            existing.SourceService = entry.SourceService;
+            existing.UrlPathParameters = entry.UrlPathParameters;
             staged[key] = existing;
         }
 

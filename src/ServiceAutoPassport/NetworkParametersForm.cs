@@ -5,6 +5,7 @@ namespace ServiceAutoPassport;
 internal sealed class NetworkParametersForm : Form
 {
     private readonly Dictionary<string, NetworkTargetSettings> _parameterSources;
+    private readonly IReadOnlyList<NetworkServiceInput> _services;
     private readonly Action<IReadOnlyDictionary<string, NetworkParameterEdit>> _save;
     private readonly Func<IReadOnlyDictionary<string, NetworkParameterEdit>, NetworkTemplatePrefillResult> _prefill;
     private readonly Dictionary<string, NetworkParameterEdit> _draft = new(StringComparer.Ordinal);
@@ -28,10 +29,12 @@ internal sealed class NetworkParametersForm : Form
 
     public NetworkParametersForm(IReadOnlyDictionary<string, NetworkTargetSettings> targets,
         IReadOnlyList<NetworkConnection> connections,
+        IReadOnlyList<NetworkServiceInput> services,
         Action<IReadOnlyDictionary<string, NetworkParameterEdit>> save,
         Func<IReadOnlyDictionary<string, NetworkParameterEdit>, NetworkTemplatePrefillResult> prefill)
     {
         _parameterSources = new(targets, StringComparer.Ordinal);
+        _services = services;
         foreach (var connection in connections)
             _parameterSources.TryAdd(connection.TargetKey, connection.ExternalTarget);
         _save = save;
@@ -77,6 +80,13 @@ internal sealed class NetworkParametersForm : Form
 
         var paste = new Button { Text = "Вставить из Excel…", AutoSize = true };
         paste.Click += (_, _) => Import();
+        var copy = new Button { Text = "Скопировать все строки", AutoSize = true };
+        copy.Click += (_, _) =>
+        {
+            if (ReadValidDraft())
+                TableClipboard.Copy(this, _hint,
+                    () => NetworkParameterCatalog.Export(_draft, _parameterSources, _services), _draft.Count);
+        };
         var fromTemplate = new Button { Text = "Предзаполнить из шаблона", AutoSize = true };
         fromTemplate.Click += (_, _) => ImportTemplate();
         var delete = new Button { Text = "Удалить выбранные", AutoSize = true, Enabled = _grid.SelectedRows.Count > 0 };
@@ -91,7 +101,7 @@ internal sealed class NetworkParametersForm : Form
             FlowDirection = FlowDirection.RightToLeft,
             WrapContents = true
         };
-        actions.Controls.AddRange([cancel, saveButton, delete, paste, fromTemplate]);
+        actions.Controls.AddRange([cancel, saveButton, delete, paste, copy, fromTemplate]);
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(12) };
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -115,12 +125,15 @@ internal sealed class NetworkParametersForm : Form
         if (!_grid.EndEdit()) return;
         ReadDraft();
         using var dialog = new TablePasteForm<IReadOnlyDictionary<string, NetworkParameterEdit>>("Вставить параметры из Excel",
-            "Скопируйте колонки «Найденный параметр», «Название элемента», «Блок» и необязательную колонку «Блок-родитель». " +
-            "Вставьте их сюда (Ctrl+V). Пустая четвёртая ячейка очищает родителя.",
-            "Вставить", text => NetworkParameterCatalog.ParseExcel(text, _parameterSources, _draft));
+            "Вставьте экспорт приложения или колонки «Найденный параметр», «Название элемента», «Блок» " +
+            "и необязательную колонку «Блок-родитель» (Ctrl+V).",
+            "Импортировать", text => NetworkParameterCatalog.ParseEntries(text, _parameterSources, _draft, _services));
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
-        var (added, updated) = ApplyEdits(dialog.Result!);
+        var changes = SettingsTableImport.SelectChanges(dialog.Result!, _draft.ContainsKey,
+            count => TableClipboard.ReplaceMatches(this, count));
+        if (changes is null) return;
+        var (added, updated) = ApplyEdits(changes);
         _hint.Text = $"Добавлено {added}, обновлено {updated}. Нажмите «Сохранить», чтобы применить правки.";
     }
 
@@ -171,6 +184,7 @@ internal sealed class NetworkParametersForm : Form
     private (int Added, int Updated) ApplyEdits(IReadOnlyDictionary<string, NetworkParameterEdit> edits)
     {
         var rows = _grid.Rows.Cast<DataGridViewRow>().ToDictionary(row => (string)row.Tag!, StringComparer.Ordinal);
+        var added = 0;
         var updated = 0;
         foreach (var (key, edit) in edits)
         {
@@ -185,10 +199,11 @@ internal sealed class NetworkParametersForm : Form
             else
             {
                 var source = _parameterSources.GetValueOrDefault(key) ?? new NetworkTargetSettings();
-                AddRow(key, NetworkParameterCatalog.DisplayParameter(key, source), edit);
+                AddRow(key, NetworkParameterCatalog.DisplayParameter(key, source, edit.Source), edit);
+                added++;
             }
         }
-        return (edits.Count - updated, updated);
+        return (added, updated);
     }
 
     private void ReadDraft()
@@ -200,8 +215,9 @@ internal sealed class NetworkParametersForm : Form
             var label = row.Cells[1].Value?.ToString()?.Trim() ?? "";
             var block = row.Cells[2].Value?.ToString()?.Trim() ?? "";
             var parent = row.Cells[3].Value?.ToString()?.Trim() ?? "";
-            _draft[key] = new NetworkParameterEdit(label, block)
+            _draft[key] = previous with
             {
+                Label = label, Block = block,
                 ParentBlock = parent.Length == 0 && previous.ParentBlock is null ? null : parent,
                 LabelIsAutomatic = previous.LabelIsAutomatic && label == previous.Label,
                 BlockIsAutomatic = previous.BlockIsAutomatic && block == previous.Block
@@ -209,18 +225,20 @@ internal sealed class NetworkParametersForm : Form
         }
     }
 
-    private void SaveEdits()
+    private bool ReadValidDraft()
     {
-        if (!_grid.EndEdit()) return;
+        if (!_grid.EndEdit()) return false;
         ReadDraft();
         var missingName = _grid.Rows.Cast<DataGridViewRow>().FirstOrDefault(row => _draft[(string)row.Tag!].Label.Length == 0);
-        if (missingName is not null)
-        {
-            MessageBox.Show(this, "Укажите название элемента.", "Проверьте строку", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            _grid.CurrentCell = missingName.Cells[1];
-            return;
-        }
+        if (missingName is null) return true;
+        MessageBox.Show(this, "Укажите название элемента.", "Проверьте строку", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        _grid.CurrentCell = missingName.Cells[1];
+        return false;
+    }
 
+    private void SaveEdits()
+    {
+        if (!ReadValidDraft()) return;
         try { _save(_draft); }
         catch (Exception error)
         {
