@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text;
 using System.Text.RegularExpressions;
 using HtmlAgilityPack;
 
@@ -181,39 +182,61 @@ internal sealed partial class PassportTemplateRenderer
 
     private static HashSet<string> FilterAccess(HtmlNode table, HashSet<string> allVariables)
     {
-        var shown = new HashSet<string>(StringComparer.Ordinal);
+        var kept = new Dictionary<(string Name, string Address, string Vault), HtmlNode[]>();
         foreach (var row in Rows(table).Skip(1).ToArray())
         {
             var cells = Cells(row);
             if (cells.Length < 3) throw MissingCell("Объекты доступа");
-            var names = VariableNames(TextWithSeparators(cells[1])).Concat(VariableNames(TextWithSeparators(cells[2])))
-                .Distinct(StringComparer.Ordinal).ToArray();
-            var found = names.Where(allVariables.Contains).ToArray();
-            if (found.Length == 0)
+            PruneVariableCell(cells[1], allVariables);
+            PruneVariableCell(cells[2], allVariables);
+            var identity = (Name: Normalize(cells[0].InnerText).ToUpperInvariant(),
+                Address: KeyList(cells[1]), Vault: KeyList(cells[2]));
+            if (identity.Address.Length == 0 && identity.Vault.Length == 0)
             {
                 row.Remove();
                 continue;
             }
 
-            foreach (var name in found) shown.Add(name);
-            PruneVariableCell(cells[1], allVariables);
-            PruneVariableCell(cells[2], allVariables);
+            if (kept.TryAdd(identity, cells)) continue;
+            var first = kept[identity];
+            for (var index = 3; index < Math.Min(cells.Length, first.Length); index++)
+            {
+                var extra = cells[index];
+                var target = first[index];
+                if (!TemplateTables.HasContent(extra) || target.InnerHtml.Contains(extra.InnerHtml, StringComparison.Ordinal))
+                    continue;
+                target.InnerHtml = TemplateTables.HasContent(target)
+                    ? target.InnerHtml + "<br />" + extra.InnerHtml : extra.InnerHtml;
+            }
+            row.Remove();
         }
 
-        return shown;
+        return Rows(table).Skip(1).Select(Cells)
+            .SelectMany(cells => AccessVariableNames(cells[1]).Concat(AccessVariableNames(cells[2])))
+            .ToHashSet(StringComparer.Ordinal);
+
+        string KeyList(HtmlNode cell) => string.Join(" ", AccessVariableNames(cell).Where(allVariables.Contains)
+            .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal));
     }
 
     private static void PruneVariableCell(HtmlNode cell, HashSet<string> allVariables)
     {
+        var (text, parts) = ReadAccessText(cell);
+        var removed = new bool[text.Length];
+        foreach (Match match in VariableRegex().Matches(text))
+            if (!allVariables.Contains(match.Value))
+                Array.Fill(removed, true, match.Index, match.Length);
+
         var changedParagraphs = new HashSet<HtmlNode>();
-        foreach (var node in cell.DescendantsAndSelf().Where(node => node.NodeType == HtmlNodeType.Text).ToArray())
+        foreach (var (node, start, length) in parts)
         {
-            if (!VariableRegex().IsMatch(node.InnerText)) continue;
+            if (!removed.AsSpan(start, length).Contains(true)) continue;
             var paragraph = node.Ancestors("p").FirstOrDefault();
             if (paragraph is not null) changedParagraphs.Add(paragraph);
-            var replacement = VariableRegex().Replace(node.InnerText,
-                match => allVariables.Contains(match.Value) ? match.Value : "");
-            node.InnerHtml = WebUtility.HtmlEncode(replacement);
+            var replacement = new StringBuilder(length);
+            for (var index = start; index < start + length; index++)
+                if (!removed[index]) replacement.Append(text[index]);
+            node.InnerHtml = WebUtility.HtmlEncode(replacement.ToString());
         }
 
         foreach (var paragraph in changedParagraphs)
@@ -317,9 +340,32 @@ internal sealed partial class PassportTemplateRenderer
     private static IEnumerable<string> VariableNames(string text) => VariableRegex().Matches(text)
         .Select(match => match.Value);
 
-    private static string TextWithSeparators(HtmlNode node) => string.Join(" ",
-        node.DescendantsAndSelf().Where(part => part.NodeType == HtmlNodeType.Text)
-            .Select(part => part.InnerText));
+    internal static IEnumerable<string> AccessVariableNames(HtmlNode node) => VariableNames(ReadAccessText(node).Text);
+
+    private static (string Text, List<(HtmlNode Node, int Start, int Length)> Parts) ReadAccessText(HtmlNode cell)
+    {
+        var text = new StringBuilder();
+        var parts = new List<(HtmlNode, int, int)>();
+        Append(cell);
+        return (text.ToString(), parts);
+
+        void Append(HtmlNode node)
+        {
+            if (node.NodeType == HtmlNodeType.Text)
+            {
+                var value = WebUtility.HtmlDecode(node.InnerText);
+                parts.Add((node, text.Length, value.Length));
+                text.Append(value);
+                return;
+            }
+
+            // Formatting spans can divide one name. Block boundaries still separate names.
+            var separates = node.Name is "p" or "br" or "div" or "ul" or "ol" or "li" or "tr" or "td" or "th" or "pre";
+            if (separates) text.Append(' ');
+            foreach (var child in node.ChildNodes) Append(child);
+            if (separates) text.Append(' ');
+        }
+    }
 
     private static string Normalize(string text) => WhitespaceRegex().Replace(WebUtility.HtmlDecode(text), " ").Trim();
 

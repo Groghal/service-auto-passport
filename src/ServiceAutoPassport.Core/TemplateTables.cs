@@ -21,6 +21,9 @@ internal static class TemplateTables
                    texts.Any(text => text.Contains(second, StringComparison.OrdinalIgnoreCase));
         });
 
-    private static string Normalize(string text) =>
+    public static bool HasContent(HtmlNode cell) => Normalize(cell.InnerText).Length > 0 ||
+        cell.Descendants().Any(node => node.Name is "img" or "a" || node.Attributes["data-macro-name"] is not null);
+
+    public static string Normalize(string text) =>
         Regex.Replace(HtmlEntity.DeEntitize(text), @"\s+", " ").Trim();
 }

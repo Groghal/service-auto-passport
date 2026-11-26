@@ -494,6 +494,191 @@ public sealed class PassportTests
         Assert.Equal("Секретный токен доступа", imported["PRIVATE_TOKEN"]);
     }
 
+    [Theory]
+    [InlineData(PassportTemplateSource.Clipboard)]
+    [InlineData(PassportTemplateSource.Saved)]
+    [InlineData(PassportTemplateSource.SavedWithClipboard)]
+    public void PassportModesKeepNewAccessRowsAndKeys(PassportTemplateSource mode)
+    {
+        using var fixture = new Fixture();
+        fixture.Write("app-params/.git/config", "[remote \"origin\"]\nurl = https://gitlab.example/app-params.git\n");
+        fixture.Write("component/.git/config", "[remote \"origin\"]\nurl = https://gitlab.example/component.git\n");
+        fixture.Write("app-params/application.yml", "");
+        var j2 = "component/demo/appsettings.deploy.j2";
+        fixture.Write(j2, "{{ DOCUMENT_API_HOST }}/services/documents {{ KKT_URL }} {{ S3_TEST_URL }} {{ S3_BACKUP_HOST }}");
+        fixture.Write("component/demo/appsettings.secrets.j2",
+            "DocumentApi__Login: '{{ DOCUMENT_API_LOGIN }}'\nDocumentApi__Password: '{{ DOCUMENT_API_PASSWORD }}'");
+        var clipboard = """
+            <table>
+              <tr><th>Объект доступа</th><th>Адрес</th><th>Ключи в Vault</th><th>Комментарии</th></tr>
+              <tr><td>Document API</td><td><span>DOCUMENT_API</span><strong>_HOST</strong></td><td><p>DOCUMENT_API<span>_LOGIN</span></p><p>DOCUMENT_API_PASSWORD</p><p><span>UNUSED</span><strong>_SECRET</strong></p></td><td>Новый объект</td></tr>
+              <tr><td>ККТ</td><td>KKT_URL</td><td></td><td></td></tr>
+              <tr><td>Лишний объект</td><td>UNUSED_HOST</td><td></td><td></td></tr>
+              <tr><td>S3</td><td>S3_TEST_URL<br>S3_BACKUP_HOST</td><td></td><td>Новый комментарий</td></tr>
+            </table>
+            """;
+        var template = new HtmlDocument();
+        template.LoadHtml(TestTemplate.FullPage);
+        var original = template.DocumentNode.Descendants("table").ElementAt(2);
+        var updated = HtmlNode.CreateNode(clipboard);
+        original.ParentNode!.ReplaceChild(updated, original);
+        var full = CfHtml.Build(template.DocumentNode.InnerHtml);
+        TemplateValueMerger.ValidateFullTemplate(full);
+        var saved = mode == PassportTemplateSource.SavedWithClipboard ? CfHtml.Build(TestTemplate.FullPage) : full;
+        var source = TemplateValueMerger.SelectSource(mode, saved, () => mode switch
+        {
+            PassportTemplateSource.Clipboard => full,
+            PassportTemplateSource.SavedWithClipboard => CfHtml.Build(clipboard),
+            _ => throw new InvalidOperationException("Сохранённый шаблон не должен читать буфер.")
+        }, null);
+        var result = PassportGenerator.Generate(source,
+            new PassportOptions("demo", fixture.PathTo("app-params"), fixture.PathTo(j2)));
+
+        var doc = new HtmlDocument();
+        doc.LoadHtml(result.HtmlFragment);
+        var tables = doc.DocumentNode.Descendants("table").ToArray();
+        var accessRows = tables[2].Descendants("tr").ToArray();
+        var documentApi = Assert.Single(accessRows.Where(row => Cell(row, 0) == "Document API"));
+        Assert.Equal("DOCUMENT_API_HOST", Cell(documentApi, 1));
+        Assert.Equal("_HOST", Cells(documentApi)[1].Descendants("strong").Single().InnerText);
+        Assert.Contains("DOCUMENT_API_LOGIN", Cell(documentApi, 2));
+        Assert.Contains("DOCUMENT_API_PASSWORD", Cell(documentApi, 2));
+        Assert.DoesNotContain("UNUSED", Cell(documentApi, 2));
+        Assert.Contains("KKT_URL", tables[2].InnerText);
+        Assert.DoesNotContain("UNUSED_HOST", tables[2].InnerText);
+        var s3 = Assert.Single(accessRows.Where(row => Cell(row, 0) == "S3"));
+        Assert.Contains("S3_TEST_URL", Cell(s3, 1));
+        Assert.Contains("S3_BACKUP_HOST", Cell(s3, 1));
+        Assert.Equal("Новый комментарий", Cell(s3, 3));
+        Assert.DoesNotContain("DOCUMENT_API_LOGIN", tables[4].InnerText);
+    }
+
+    [Theory]
+    [InlineData(PassportTemplateSource.Clipboard)]
+    [InlineData(PassportTemplateSource.Saved)]
+    [InlineData(PassportTemplateSource.SavedWithClipboard)]
+    public void FullAccessTableKeepsUsedRowsInClipboardHtml(PassportTemplateSource mode)
+    {
+        using var fixture = new Fixture();
+        fixture.Write("app-params/.git/config", "[remote \"origin\"]\nurl = https://gitlab.example/team/params.git\n");
+        fixture.Write("component/.git/config", "[remote \"origin\"]\nurl = https://gitlab.example/team/service.git\n");
+        fixture.Write("app-params/application.yml", "");
+        const string main = "component/demo/appsettings.deploy.j2";
+        fixture.Write(main, """{ "Metrics": "{{ METRICS_HOST }}", "Endpoint": "{{ DOCUMENT_API_HOST }}/docs", "Extra": "{{ OTHER_HOST }}" }""");
+        fixture.Write("component/demo/appsettings.secrets.j2",
+            "Api__Login: '{{ DOCUMENT_API_LOGIN }}'\nApi__Password: '{{ DOCUMENT_API_PASSWORD }}'");
+        const string access = """
+            <table class="confluenceTable relative-table"><colgroup><col /><col /><col /><col /></colgroup>
+            <thead><tr><th>Объект доступа</th><th>Переменная адреса в app-params</th><th>Ключи в Vault</th><th>Комментарий</th></tr></thead><tbody>
+            <tr><td>Observability</td><td><p>METRICS_HOST</p></td><td><p><br /></p></td><td></td></tr>
+            <tr><td>Unused</td><td><p>UNUSED_HOST</p></td><td></td><td></td></tr>
+            <tr><td>Document API</td><td><p><span style="color: #172b4d;">DOCUMENT_API_HOST</span></p></td>
+            <td><p>DOCUMENT_API_LOGIN</p><p>DOCUMENT_API_PASSWORD</p></td><td></td></tr>
+            </tbody></table>
+            """;
+        var template = new HtmlDocument();
+        template.LoadHtml(TestTemplate.FullPage);
+        var original = template.DocumentNode.Descendants("table").ElementAt(2);
+        original.ParentNode!.ReplaceChild(HtmlNode.CreateNode(access), original);
+        var full = CfHtml.Build(template.DocumentNode.InnerHtml);
+        var merged = mode == PassportTemplateSource.SavedWithClipboard;
+        var saved = merged ? CfHtml.Build(TestTemplate.FullPage) : full;
+        TemplateValueMerger.ValidateFullTemplate(saved);
+        var source = TemplateValueMerger.SelectSource(mode, saved,
+            () => full, null);
+        var result = PassportGenerator.Generate(source, new PassportOptions("demo",
+            fixture.PathTo("app-params"), fixture.PathTo(main)));
+        var doc = new HtmlDocument();
+        doc.LoadHtml(CfHtml.ExtractFragment(CfHtml.Build(result.HtmlFragment)));
+        var tables = doc.DocumentNode.Descendants("table").ToArray();
+        var rows = tables[2].Descendants("tr").Where(row => row.Elements("td").Any()).ToArray();
+        Assert.Equal(new[] { "Observability", "Document API" }, rows.Select(row => Cell(row, 0)));
+        Assert.Equal("METRICS_HOST", Cell(rows[0], 1));
+        Assert.Equal("DOCUMENT_API_HOST", Cell(rows[1], 1));
+        Assert.Equal(new[] { "DOCUMENT_API_LOGIN", "DOCUMENT_API_PASSWORD" },
+            Cells(rows[1])[2].Elements("p").Select(node => node.InnerText));
+        Assert.Contains("OTHER_HOST", tables[4].InnerText);
+        Assert.DoesNotContain("DOCUMENT_API_", tables[4].InnerText);
+        Assert.DoesNotContain("METRICS_HOST", tables[4].InnerText);
+        var trace = Assert.IsType<PassportVariableTrace>(result.VariableTrace);
+        var report = trace.Describe("DOCUMENT_API_PASSWORD");
+        Assert.Contains("В файле секретов: да", report);
+        Assert.Contains("Объекты доступа в шаблоне перед заполнением: Document API", report);
+        Assert.Contains("Объекты доступа в готовом HTML: Document API", report);
+        Assert.Contains("В таблице параметров готового HTML: нет", report);
+        Assert.Contains("В таблице параметров готового HTML: да", trace.Describe("OTHER_HOST"));
+        Assert.Contains("Объекты доступа в готовом HTML: нет", trace.Describe("UNUSED_HOST"));
+    }
+
+    [Theory]
+    [InlineData(PassportTemplateSource.Clipboard)]
+    [InlineData(PassportTemplateSource.Saved)]
+    [InlineData(PassportTemplateSource.SavedWithClipboard)]
+    public void PlainJ2LoadsItsPairedSecretsForAccessAndRemainingParameters(PassportTemplateSource mode)
+    {
+        using var fixture = new Fixture();
+        fixture.Write("app-params/.git/config", "[remote \"origin\"]\nurl = https://gitlab.example/team/params.git\n");
+        fixture.Write("component/.git/config", "[remote \"origin\"]\nurl = https://gitlab.example/team/service.git\n");
+        fixture.Write("app-params/application.yml", "");
+        const string main = "component/demo/appsettings.j2";
+        fixture.Write(main, """{ "Endpoint": "{{ MAIN_ENDPOINT }}" }""");
+        fixture.Write("component/demo/appsettings.secrets.j2",
+            "Storage__Credential: '{{ S3_TEST_SECRET_KEY }}'\nToken: '{{ PRIVATE_TOKEN }}'");
+        fixture.Write("component/demo/secrets.j2", "Other: '{{ UNRELATED_TOKEN }}'");
+
+        var full = CfHtml.Build(TestTemplate.FullPage);
+        var source = TemplateValueMerger.SelectSource(mode, full, () => full, null);
+        var result = PassportGenerator.Generate(source, new PassportOptions("demo",
+            fixture.PathTo("app-params"), fixture.PathTo(main)));
+        var doc = new HtmlDocument();
+        doc.LoadHtml(CfHtml.ExtractFragment(CfHtml.Build(result.HtmlFragment)));
+        var tables = doc.DocumentNode.Descendants("table").ToArray();
+        var row = Assert.Single(tables[2].Descendants("tr").Where(row => Cell(row, 0) == "S3"));
+        Assert.Equal("S3_TEST_SECRET_KEY", Cell(row, 2));
+        Assert.DoesNotContain("S3_TEST_SECRET_KEY", tables[4].InnerText);
+        Assert.Equal("Да", Cell(FindRow(tables[4], "PRIVATE_TOKEN"), 2));
+        Assert.Contains("MAIN_ENDPOINT", tables[4].InnerText);
+        Assert.DoesNotContain("UNRELATED_TOKEN", result.HtmlFragment);
+    }
+
+    [Fact]
+    public void AccessObjectsWithTheSameCaptionMatchByKeysAndRenderOnce()
+    {
+        using var fixture = new Fixture();
+        fixture.Write("app-params/.git/config", "[remote \"origin\"]\nurl = https://gitlab.example/app-params.git\n");
+        fixture.Write("component/.git/config", "[remote \"origin\"]\nurl = https://gitlab.example/component.git\n");
+        fixture.Write("app-params/application.yml", "");
+        var j2 = "component/demo/appsettings.deploy.j2";
+        fixture.Write(j2, "{{ DB_PRO_PRODUCTS_HOST }} {{ DB_REPORTS_HOST }} {{ DB_AUDIT_HOST }} {{ DOCUMENT_API_HOST }}");
+        var saved = new HtmlDocument();
+        saved.LoadHtml(TestTemplate.FullPage);
+        var access = saved.DocumentNode.Descendants("table").ElementAt(2);
+        access.AppendChild(HtmlNode.CreateNode("<tr><td>БД</td><td>DB_PRO_PRODUCTS_HOST</td><td></td><td></td></tr>"));
+        access.AppendChild(HtmlNode.CreateNode("<tr><td>БД</td><td>DB_PRO_PRODUCTS_HOST<p>DB_UNUSED_PORT</p></td><td></td><td>Рабочая БД</td></tr>"));
+        access.AppendChild(HtmlNode.CreateNode("<tr><td>БД</td><td>DB_UNUSED_HOST</td><td></td><td></td></tr>"));
+        var clipboard = """
+            <table>
+            <tr><th>Объект доступа</th><th>Адрес</th><th>Ключи в Vault</th><th>Комментарии</th></tr>
+            <tr><td>БД</td><td>DB_PRO_PRODUCTS_HOST</td><td></td><td>Основная БД</td></tr>
+            <tr><td>БД</td><td>DB_REPORTS_HOST</td><td></td><td>Отчёты</td></tr>
+            <tr><td>БД</td><td>DB_REPORTS_HOST<br>DB_UNUSED_PORT</td><td></td><td>Доступ к отчётам</td></tr>
+            <tr><td>БД</td><td>DB_AUDIT_HOST</td><td></td><td>Аудит</td></tr>
+            <tr><td>Document API</td><td>DOCUMENT_API_HOST</td><td></td><td></td></tr>
+            </table>
+            """;
+        var source = TemplateValueMerger.Merge(CfHtml.Build(saved.DocumentNode.InnerHtml), CfHtml.Build(clipboard));
+        var result = PassportGenerator.Generate(source, new PassportOptions("demo", fixture.PathTo("app-params"), fixture.PathTo(j2)));
+        var doc = new HtmlDocument();
+        doc.LoadHtml(result.HtmlFragment);
+        var rows = doc.DocumentNode.Descendants("table").ElementAt(2).Descendants("tr").ToArray();
+        Assert.Equal(new[] { "DB_PRO_PRODUCTS_HOST", "DB_REPORTS_HOST", "DB_AUDIT_HOST" },
+            rows.Where(row => Cell(row, 0) == "БД").Select(row => Cell(row, 1)));
+        var products = Assert.Single(rows.Where(row => Cell(row, 1) == "DB_PRO_PRODUCTS_HOST"));
+        Assert.Contains("Основная БД", Cell(products, 3));
+        Assert.Contains("Рабочая БД", Cell(products, 3));
+        Assert.Contains(rows, row => Cell(row, 0) == "Document API" && Cell(row, 1) == "DOCUMENT_API_HOST");
+    }
+
     [Fact]
     public void AccessRowsKeepOnlyVariablesPresentInDeployOrSecrets()
     {

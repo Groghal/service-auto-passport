@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using HtmlAgilityPack;
+using static ServiceAutoPassport.Core.TemplateTables;
 
 namespace ServiceAutoPassport.Core;
 
@@ -117,20 +118,69 @@ public static class TemplateValueMerger
     private static void MergeAccess(HtmlNode target, HtmlNode? source)
     {
         if (source is null) return;
-        var sourceRows = Rows(source).Skip(1)
-            .Where(row => Cells(row).Length >= 4)
-            .GroupBy(row => Normalize(Cells(row)[0].InnerText), StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
-        foreach (var row in Rows(target).Skip(1))
+        var targetRows = Rows(target).ToArray();
+        var width = Cells(targetRows[0]).Length;
+        var parent = targetRows.Skip(1).LastOrDefault()?.ParentNode ?? target.Element("tbody") ?? target;
+        var existing = targetRows.Skip(1).Select(Cells).Where(cells => cells.Length >= 3)
+            .ToList();
+        foreach (var row in Rows(source).Skip(1))
         {
-            var cells = Cells(row);
-            if (cells.Length < 4 || !sourceRows.TryGetValue(Normalize(cells[0].InnerText), out var sourceRow)) continue;
-            var sourceCells = Cells(sourceRow);
-            for (var index = 3; index < Math.Min(cells.Length, sourceCells.Length); index++)
+            var sourceCells = Cells(row);
+            if (sourceCells.Length < 3) continue;
+            var name = Normalize(sourceCells[0].InnerText);
+            if (name.Length == 0) continue;
+            var candidates = existing.Where(cells => Normalize(cells[0].InnerText)
+                .Equals(name, StringComparison.OrdinalIgnoreCase));
+            var cells = FindAccessMatch(sourceCells, candidates);
+            if (cells is null)
             {
-                if (HasContent(sourceCells[index])) cells[index].InnerHtml = sourceCells[index].InnerHtml;
+                var added = row.CloneNode(true);
+                foreach (var extra in Cells(added).Skip(width)) extra.Remove();
+                for (var index = sourceCells.Length; index < width; index++)
+                    added.AppendChild(HtmlNode.CreateNode("<td><br /></td>"));
+                parent.AppendChild(added);
+                existing.Add(Cells(added));
+                continue;
             }
+
+            MergeAccessKeys(cells[1], sourceCells[1]);
+            MergeAccessKeys(cells[2], sourceCells[2]);
+            for (var index = 3; index < Math.Min(cells.Length, sourceCells.Length); index++)
+                if (HasContent(sourceCells[index])) cells[index].InnerHtml = sourceCells[index].InnerHtml;
         }
+    }
+
+    private static HtmlNode[]? FindAccessMatch(HtmlNode[] source, IEnumerable<HtmlNode[]> candidates)
+    {
+        static HashSet<string> Keys(HtmlNode cell) =>
+            PassportTemplateRenderer.AccessVariableNames(cell).ToHashSet(StringComparer.Ordinal);
+        var addresses = Keys(source[1]);
+        var vault = Keys(source[2]);
+        var rows = candidates.Select(cells => (Cells: cells, Addresses: Keys(cells[1]), Vault: Keys(cells[2]))).ToArray();
+        var exact = rows.FirstOrDefault(row => row.Addresses.SetEquals(addresses) && row.Vault.SetEquals(vault));
+        if (exact.Cells is not null) return exact.Cells;
+
+        var byAddress = rows.Where(row => row.Addresses.Overlaps(addresses) &&
+            (vault.Count == 0 || row.Vault.Count == 0 || row.Vault.Overlaps(vault))).Take(2).ToArray();
+        if (byAddress.Length != 0) return byAddress.Length == 1 ? byAddress[0].Cells : null;
+
+        // Shared credentials alone cannot identify two rows with different addresses.
+        var byVault = rows.Where(row => (row.Addresses.Count == 0 || addresses.Count == 0) && row.Vault.Overlaps(vault))
+            .Take(2).ToArray();
+        return byVault.Length == 1 ? byVault[0].Cells : null;
+    }
+
+    private static void MergeAccessKeys(HtmlNode target, HtmlNode source)
+    {
+        var saved = PassportTemplateRenderer.AccessVariableNames(target).ToHashSet(StringComparer.Ordinal);
+        var added = PassportTemplateRenderer.AccessVariableNames(source).Where(saved.Add).ToArray();
+        if (added.Length == 0) return;
+        if (!HasContent(target))
+        {
+            target.InnerHtml = source.InnerHtml;
+            return;
+        }
+        foreach (var name in added) target.AppendChild(HtmlNode.CreateNode($"<p>{name}</p>"));
     }
 
     private static void MergeParameters(HtmlNode target, HtmlNode? source)
@@ -237,9 +287,4 @@ public static class TemplateValueMerger
     private static string? VariableName(HtmlNode cell) => Regex.Match(Normalize(cell.InnerText),
         @"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b").Value is { Length: > 0 } name ? name : null;
 
-    private static bool HasContent(HtmlNode cell) => Normalize(cell.InnerText).Length > 0 ||
-        cell.Descendants().Any(node => node.Name is "img" or "a" || node.Attributes["data-macro-name"] is not null);
-
-    private static string Normalize(string text) =>
-        Regex.Replace(HtmlEntity.DeEntitize(text), @"\s+", " ").Trim();
 }

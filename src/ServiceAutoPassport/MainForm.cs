@@ -46,6 +46,10 @@ internal sealed class MainForm : Form
     private readonly Button _generateFromDefault = new() { Text = "Заполнить сохранённый шаблон", Dock = DockStyle.Fill };
     private readonly Button _generateMerged = new() { Text = "Сохранённый шаблон + буфер", Dock = DockStyle.Fill };
 
+    private readonly Button _inspectVariable = new() { Text = "Проверить переменную…", Dock = DockStyle.Fill, Enabled = false };
+    private PassportVariableTrace? _lastVariableTrace;
+    private string _lastGenerationMode = "";
+
     private string? _activeService;
     private string? _activeServiceFolder;
     private string? _lastCheckedClipboardHtml;
@@ -80,6 +84,7 @@ internal sealed class MainForm : Form
         _appParamsRoot.Leave += (_, _) => TryRefresh(RefreshDomainApiVariables);
         _serviceFolder.Leave += (_, _) => TryRefresh(RefreshForServiceFolder);
         _saveTemplate.Click += SaveDefaultTemplate;
+        _inspectVariable.Click += (_, _) => InspectVariable();
         _editKeyDescriptions.Click += EditKeyDescriptions;
         _generateCurrent.Click += (_, _) => GeneratePassport(PassportTemplateSource.Clipboard);
         _generateFromDefault.Click += (_, _) => GeneratePassport(PassportTemplateSource.Saved);
@@ -186,7 +191,12 @@ internal sealed class MainForm : Form
         actions.Controls.Add(_generateMerged, 3, 0);
         root.Controls.Add(actions, 0, 4);
         _status.AutoEllipsis = true;
-        root.Controls.Add(_status, 0, 5);
+        var resultStatus = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
+        resultStatus.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        resultStatus.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
+        resultStatus.Controls.Add(_status, 0, 0);
+        resultStatus.Controls.Add(_inspectVariable, 1, 0);
+        root.Controls.Add(resultStatus, 0, 5);
         var passportTab = new TabPage("Паспорт сервиса");
         passportTab.Controls.Add(root);
         var networkTab = new TabPage("Сетевые подключения");
@@ -444,6 +454,51 @@ internal sealed class MainForm : Form
             !busy && !string.IsNullOrWhiteSpace(_settings.DefaultTemplateHtml);
     }
 
+    private void InspectVariable()
+    {
+        if (_lastVariableTrace is not { } trace) return;
+        string clipboardStatus;
+        try
+        {
+            clipboardStatus = CfHtml.ExtractFragment(WindowsClipboard.ReadHtml()) ==
+                CfHtml.ExtractFragment(_generatedClipboardHtml!) ? "совпадает с результатом" : "отличается от результата";
+        }
+        catch (Exception error) when (error is InvalidDataException or ExternalException or ArgumentException)
+        {
+            clipboardStatus = "не удалось прочитать HTML";
+        }
+        using var dialog = new Form
+        {
+            Text = $"Проверка последнего паспорта — {_lastGenerationMode}",
+            StartPosition = FormStartPosition.CenterParent,
+            MinimumSize = new Size(560, 310),
+            ClientSize = new Size(740, 350)
+        };
+        var name = new TextBox { Dock = DockStyle.Fill, PlaceholderText = "Имя переменной из J2" };
+        var report = new TextBox
+        {
+            Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical
+        };
+        var check = MakeButton("Проверить", (_, _) =>
+        {
+            if (name.Text.Trim().Length > 0)
+                report.Text = _lastGenerationMode + Environment.NewLine + trace.Describe(name.Text) + Environment.NewLine +
+                    $"HTML в буфере при открытии проверки: {clipboardStatus}";
+        });
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(10), ColumnCount = 2, RowCount = 2 };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.Controls.Add(name, 0, 0);
+        layout.Controls.Add(check, 1, 0);
+        layout.Controls.Add(report, 0, 1);
+        layout.SetColumnSpan(report, 2);
+        dialog.Controls.Add(layout);
+        dialog.AcceptButton = check;
+        dialog.ShowDialog(this);
+    }
+
     private void GeneratePassport(PassportTemplateSource templateSource)
     {
         UpdateGenerationButtons(busy: true);
@@ -468,6 +523,14 @@ internal sealed class MainForm : Form
             var result = PassportGenerator.Generate(source, options);
             var generatedHtml = CfHtml.Build(result.HtmlFragment);
             WindowsClipboard.Write(generatedHtml, result.PlainText);
+            _lastVariableTrace = result.VariableTrace;
+            _lastGenerationMode = templateSource switch
+            {
+                PassportTemplateSource.Clipboard => _generateCurrent.Text,
+                PassportTemplateSource.Saved => _generateFromDefault.Text,
+                _ => _generateMerged.Text
+            };
+            _inspectVariable.Enabled = _lastVariableTrace is not null;
             _generatedClipboardHtml = generatedHtml;
             _lastCheckedClipboardHtml = generatedHtml;
             SetClipboardIndicator("В буфере готовый паспорт.",

@@ -17,7 +17,10 @@ public sealed record PassportOptions(
     string? ServiceFolder = null,
     string DomainApiVariable = "");
 
-public sealed record PassportResult(string HtmlFragment, string PlainText);
+public sealed record PassportResult(string HtmlFragment, string PlainText)
+{
+    public PassportVariableTrace? VariableTrace { get; init; }
+}
 
 public static class PassportGenerator
 {
@@ -34,6 +37,7 @@ public static class PassportGenerator
         IReadOnlyList<string> mainVariables = Array.Empty<string>();
         IReadOnlyList<string> secretVariables = Array.Empty<string>();
         string? allowedServicesVariable = null;
+        string? loadedSecretFile = null;
         if (hasJ2)
         {
             if (!File.Exists(options.J2File))
@@ -41,14 +45,15 @@ public static class PassportGenerator
             mainVariables = J2Variables.Extract(File.ReadAllText(options.J2File!));
             var j2Directory = Path.GetDirectoryName(Path.GetFullPath(options.J2File!))!;
             var j2Name = Path.GetFileName(options.J2File!);
-            var namedSecretFile = j2Name.EndsWith(".deploy.j2", StringComparison.OrdinalIgnoreCase)
-                ? Path.Combine(j2Directory, j2Name[..^".deploy.j2".Length] + ".secrets.j2")
-                : null;
-            var secretFile = namedSecretFile is not null && File.Exists(namedSecretFile)
+            var baseName = j2Name.EndsWith(".deploy.j2", StringComparison.OrdinalIgnoreCase)
+                ? j2Name[..^".deploy.j2".Length] : Path.GetFileNameWithoutExtension(j2Name);
+            var namedSecretFile = Path.Combine(j2Directory, baseName + ".secrets.j2");
+            var secretFile = File.Exists(namedSecretFile)
                 ? namedSecretFile : Path.Combine(j2Directory, "secrets.j2");
             if (File.Exists(secretFile))
             {
                 var secrets = File.ReadAllText(secretFile);
+                loadedSecretFile = secretFile;
                 secretVariables = J2Variables.Extract(secrets);
                 allowedServicesVariable = J2Variables.ExtractAssignedVariable(secrets,
                     "GrpcSettings__ServerSettings__AllowedServices");
@@ -62,7 +67,11 @@ public static class PassportGenerator
         var renderer = new PassportTemplateRenderer(fragment);
         var resultHtml = renderer.Render(options, yaml, mainVariables, secretVariables, j2Git, yamlGit,
             serviceFolder, componentType, allowedServicesVariable);
-        return new PassportResult(resultHtml, ToPlainText(resultHtml));
+        return new PassportResult(resultHtml, ToPlainText(resultHtml))
+        {
+            VariableTrace = hasJ2 ? new PassportVariableTrace(options.J2File!, loadedSecretFile,
+                mainVariables, secretVariables, fragment, resultHtml) : null
+        };
     }
 
     private static string ToPlainText(string html)
