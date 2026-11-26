@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Globalization;
 using ServiceAutoPassport.Core;
 
 namespace ServiceAutoPassport;
@@ -88,6 +89,17 @@ internal sealed class NetworkMapControl : UserControl
             ToolTipText = "Внешний контейнер для указанного блока. Если «Блок» пуст, сервис помещается прямо в блок-родитель.",
             DefaultCellStyle = new DataGridViewCellStyle { DataSourceNullValue = "" }
         });
+        var diagramColumn = new DataGridViewTextBoxColumn
+        {
+            DataPropertyName = nameof(NetworkServiceInput.DiagramColumn), HeaderText = "Колонка схемы",
+            ValueType = typeof(int), FillWeight = 65,
+            ToolTipText = "0 — центр. Отрицательные номера — слева, положительные — справа.",
+            DefaultCellStyle = new DataGridViewCellStyle
+            {
+                NullValue = "0", DataSourceNullValue = 0, Alignment = DataGridViewContentAlignment.MiddleRight
+            }
+        };
+        _inputs.Columns.Add(diagramColumn);
         _inputs.DataSource = _services; layout.Controls.Add(_inputs, 0, 4);
         var envRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2 };
         envRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 170)); envRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -117,7 +129,27 @@ internal sealed class NetworkMapControl : UserControl
         generate.Controls.AddRange(new Control[] { _analyze, analyzeClipboard, _analyzeSaved, parameters, _copyTable, _copyXml }); layout.Controls.Add(generate, 0, 8);
         layout.Controls.Add(_review, 0, 9); layout.Controls.Add(_diagnostics, 0, 10); Controls.Add(layout);
         _appParamsRoot.TextChanged += (_, _) => InvalidateAnalysis();
-        _inputs.CellValueChanged += (_, _) => InvalidateAnalysis();
+        _inputs.CellValueChanged += (_, e) =>
+        {
+            if (e.ColumnIndex != diagramColumn.Index) InvalidateAnalysis();
+        };
+        _inputs.CellValidating += (sender, e) =>
+        {
+            if (e.ColumnIndex != diagramColumn.Index || e.RowIndex < 0) return;
+            e.Cancel = !TryReadDiagramColumn(e.FormattedValue, out _);
+            _inputs[e.ColumnIndex, e.RowIndex].ErrorText = e.Cancel ? "Введите целое число, например -1, 0 или 2." : "";
+        };
+        _inputs.CellParsing += (_, e) =>
+        {
+            if (e.ColumnIndex != diagramColumn.Index || !TryReadDiagramColumn(e.Value, out var number)) return;
+            e.Value = number;
+            e.ParsingApplied = true;
+        };
+        _inputs.CellEndEdit += (_, e) =>
+        {
+            if (e.ColumnIndex == diagramColumn.Index && e.RowIndex >= 0)
+                _inputs[e.ColumnIndex, e.RowIndex].ErrorText = "";
+        };
         _environments.TextChanged += (_, _) => InvalidateAnalysis(); _ports.TextChanged += (_, _) => InvalidateAnalysis();
         _review.CurrentCellDirtyStateChanged += (_, _) =>
         {
@@ -325,8 +357,17 @@ internal sealed class NetworkMapControl : UserControl
         ToolTipText = "Узлы с одинаковым именем блока входят в один контейнер. Для отдельного узла очистите оба поля блока.",
         DefaultCellStyle = new DataGridViewCellStyle { DataSourceNullValue = "" }
     };
+    private static bool TryReadDiagramColumn(object? value, out int number)
+    {
+        var text = value?.ToString();
+        number = 0;
+        return string.IsNullOrWhiteSpace(text) ||
+            int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out number);
+    }
+
     private NetworkAnalysis ReviewedAnalysis()
     {
+        if (!_inputs.EndEdit()) throw new InvalidDataException("Проверьте номер колонки схемы.");
         _review.EndEdit();
         var analysis = _analysis ?? throw new InvalidDataException("Сначала выполните анализ.");
         NetworkMapGenerator.Refresh(analysis, _settings.Network.Ports);

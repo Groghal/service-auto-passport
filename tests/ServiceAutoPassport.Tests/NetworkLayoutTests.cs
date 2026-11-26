@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json;
 using System.Xml.Linq;
 using ServiceAutoPassport.Core;
 
@@ -35,6 +36,87 @@ public sealed class NetworkLayoutTests
         public double Right => X + W;
         public double Bottom => Y + H;
         public bool Overlaps(Box b) => X < b.Right && b.X < Right && Y < b.Bottom && b.Y < Bottom;
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(1_000_000)]
+    public void ServiceColumnsKeepEmptySlotsAndRoutesInBothDirections(int distance)
+    {
+        var services = Services(3);
+        services[0].DiagramColumn = -distance;
+        services[2].DiagramColumn = distance;
+        var connections = new[]
+        {
+            Link(services[0], "ToCenter", target: services[1]),
+            Link(services[1], "ToRight", target: services[2]),
+            Link(services[2], "ToLeft", target: services[0])
+        };
+        var analysis = Analysis(services, connections);
+        var doc = XDocument.Parse(NetworkMapGenerator.CreateDiagram(analysis));
+        var left = Bounds(doc, Cell(doc, services[0].Id));
+        var center = Bounds(doc, Cell(doc, services[1].Id));
+        var right = Bounds(doc, Cell(doc, services[2].Id));
+        Assert.Equal(distance * 444.0, center.X - left.X);
+        Assert.Equal(distance * 444.0, right.X - center.X);
+        Assert.Equal(left.Y, center.Y);
+        Assert.Equal(center.Y, right.Y);
+        var frame = Bounds(doc, Assert.Single(Cells(doc, "kind", "container")));
+        Assert.True(frame.X < left.X && frame.Right > right.Right);
+        CheckPorts(doc, "ToCenter", "1", "0");
+        CheckPorts(doc, "ToRight", "1", "0");
+        CheckPorts(doc, "ToLeft", "0", "1");
+        CheckRoutesAndNodes(doc);
+    }
+
+    [Fact]
+    public void ServiceAndDependencyCanShareTheSameColumn()
+    {
+        var services = Services(3);
+        services[0].DiagramColumn = -1;
+        services[2].DiagramColumn = 1;
+        services[2].Block = "Application";
+        var analysis = Analysis(services,
+            Link(services[0], "OnLeft", "SVC_VENDOR_HOST", "Vendor", block: "Vendor frame"),
+            Link(services[2], "OnRight", "DATABASE_HOST", "DB", block: "Application"),
+            Link(services[1], "Web", target: services[2]),
+            Link(services[0], "Center", target: services[1]));
+        var template = NetworkTableTemplates.BasicHtml.Replace("export-csv=false", "id=column-test|export-csv=false", StringComparison.Ordinal);
+        var table = NetworkMapGenerator.RenderTable(template, analysis);
+        var doc = XDocument.Parse(NetworkMapGenerator.CreateDiagram(analysis));
+        var leftService = Bounds(doc, Cell(doc, services[0].Id));
+        var rightService = Bounds(doc, Cell(doc, services[2].Id));
+        var leftTarget = Bounds(doc, Assert.Single(Cells(doc, "value", "Vendor")));
+        var rightTarget = Bounds(doc, Assert.Single(Cells(doc, "value", "DB")));
+        Assert.Equal(leftService.X, leftTarget.X);
+        Assert.Equal(rightService.X, rightTarget.X);
+        Assert.True(leftService.Bottom < leftTarget.Y);
+        Assert.True(rightService.Bottom < rightTarget.Y);
+        CheckPorts(doc, "OnLeft", "1", "1");
+        CheckPorts(doc, "OnRight", "1", "1");
+        Assert.Equal(services[2].Id, Attr(Assert.Single(Cells(doc, "sourcePath", "Web")), "target"));
+        CheckRoutesAndNodes(doc);
+
+        var configuration = JsonSerializer.Deserialize<NetworkMapSettings>("""{"Services":[{"Label":"Legacy"}]}""")!;
+        Assert.Equal(0, Assert.Single(configuration.Services).DiagramColumn);
+        configuration.Services = [.. services];
+        var restored = JsonSerializer.Deserialize<NetworkMapSettings>(JsonSerializer.Serialize(configuration))!;
+        Assert.Equal(new[] { -1, 0, 1 }, restored.Services.Select(service => service.DiagramColumn));
+
+        // Drawing again from the existing analysis uses the updated column.
+        services[2].DiagramColumn = 2;
+        var updated = XDocument.Parse(NetworkMapGenerator.CreateDiagram(analysis));
+        Assert.True(Bounds(updated, Cell(updated, services[2].Id)).X > Bounds(updated, Assert.Single(Cells(updated, "value", "DB"))).X);
+        Assert.Equal(table, NetworkMapGenerator.RenderTable(template, analysis));
+        CheckPorts(updated, "OnRight", "0", "1");
+        CheckRoutesAndNodes(updated);
+    }
+
+    private static void CheckPorts(XDocument doc, string path, string exit, string entry)
+    {
+        var style = Style(Assert.Single(Cells(doc, "sourcePath", path)));
+        Assert.Equal(exit, style["exitX"]);
+        Assert.Equal(entry, style["entryX"]);
     }
 
     private static Box Bounds(XDocument doc, XElement item)
@@ -317,8 +399,10 @@ public sealed class NetworkLayoutTests
         CheckRoutesAndNodes(doc);
     }
 
-    [Fact]
-    public void ChildBlocksKeepTheirNodesAndUseTheClosestCommonContainerForArrows()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ChildBlocksKeepTheirNodesAndUseTheClosestCommonContainerForArrows(bool useColumnOffsets)
     {
         var s = Services(6);
         s[0].Block = s[1].Block = s[5].Block = "";
@@ -328,6 +412,13 @@ public sealed class NetworkLayoutTests
         s[3].Block = " KAFKA ";
         s[4].Block = "Cache";
         s[4].ParentBlock = "k8s";
+        if (useColumnOffsets)
+        {
+            s[0].DiagramColumn = -2;
+            s[2].DiagramColumn = 2;
+            s[3].DiagramColumn = 1;
+            s[4].DiagramColumn = 2;
+        }
 
         var links = new[]
         {
@@ -335,6 +426,12 @@ public sealed class NetworkLayoutTests
             Link(s[3], "ToCache", target: s[4]), Link(s[4], "OutsideK8s", target: s[5]),
             Link(s[5], "BackToK8s", target: s[1])
         };
+        if (useColumnOffsets)
+        {
+            var dependency = Link(s[3], "Load.Host", "LOAD_HOST", "Direct dependency", block: "");
+            dependency.ExternalTarget.ParentBlock = "k8s";
+            links = [.. links, dependency];
+        }
         var analysis = Analysis(s, links);
         var xml = NetworkMapGenerator.CreateDiagram(analysis);
         var doc = XDocument.Parse(xml);
@@ -357,6 +454,13 @@ public sealed class NetworkLayoutTests
         Assert.Equal(Attr(kafka, "id"), Attr(Cell(doc, s[3].Id), "parent"));
         Assert.Equal(Attr(cache, "id"), Attr(Cell(doc, s[4].Id), "parent"));
         Assert.Equal("1", Attr(Cell(doc, s[5].Id), "parent"));
+        if (useColumnOffsets)
+        {
+            var dependency = Assert.Single(Cells(doc, "value", "Direct dependency"));
+            Assert.Equal(Attr(k8s, "id"), Attr(dependency, "parent"));
+            Assert.Equal(Bounds(doc, Cell(doc, s[3].Id)).X, Bounds(doc, dependency).X);
+            Assert.True(Bounds(doc, Cell(doc, s[3].Id)).Bottom < Bounds(doc, dependency).Y);
+        }
         string EdgeParent(string path) => Attr(Assert.Single(Cells(doc, "sourcePath", path)), "parent");
         Assert.Equal(Attr(kafka, "id"), EdgeParent("InsideKafka"));
         Assert.Equal(Attr(k8s, "id"), EdgeParent("ToKafka"));

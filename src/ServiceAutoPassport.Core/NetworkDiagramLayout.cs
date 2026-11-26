@@ -3,8 +3,7 @@ using System.Xml.Linq;
 
 namespace ServiceAutoPassport.Core;
 
-internal enum DiagramColumn { SvcDependencies, Services, OtherDependencies }
-internal sealed record DiagramVertex(string Id, string Label, DiagramColumn Column, string Block, string ParentBlock)
+internal sealed record DiagramVertex(string Id, string Label, int Column, string Block, string ParentBlock, bool IsService)
 {
     public string Container => Block.Length == 0 ? ParentBlock : Block;
 }
@@ -44,14 +43,14 @@ internal static class NetworkDiagramLayout
     private sealed record Band(string Name, DiagramVertex[] Vertices, Band[] Children)
     {
         public IEnumerable<DiagramVertex> AllVertices => Vertices.Concat(Children.SelectMany(child => child.AllVertices));
-        public bool HasServices => AllVertices.Any(vertex => vertex.Column == DiagramColumn.Services);
+        public bool HasServices => AllVertices.Any(vertex => vertex.IsService);
     }
     private sealed record PositionedBand(Band Band, double Top, double Bottom, PositionedBand[] Children);
     private sealed record Row(double Top, double Height)
     {
         public double At(double fraction) => Top + Height * fraction;
     }
-    private sealed record Wire(DiagramLink Link, DiagramColumn Column, int Exit, int Entry);
+    private sealed record Wire(DiagramLink Link, int? Gap, int Exit, int Entry);
     private sealed record Port(string CellId, DiagramBox Box, Frame? Parent, double X, double Y)
     {
         public DiagramPoint Position => new(Box.X + Box.Width * X, Box.Y + Box.Height * Y);
@@ -64,9 +63,13 @@ internal static class NetworkDiagramLayout
     {
         var vertices = inputVertices.OrderBy(v => v.Label, StringComparer.Ordinal).ThenBy(v => v.Id, StringComparer.Ordinal).ToArray();
         var links = inputLinks.OrderBy(e => e.Target, StringComparer.Ordinal).ThenBy(e => e.Source, StringComparer.Ordinal).ToArray();
+        var columns = vertices.Select(v => v.Column).Concat([-1, 0, 1]).Distinct().Order().ToArray();
+        var columnIndices = columns.Select((number, index) => (number, index)).ToDictionary(pair => pair.number, pair => pair.index);
+        int ColumnIndex(DiagramVertex vertex) => columnIndices[vertex.Column];
+
         // Include services without visible arrows so changing the selection does not recolor other services.
         var serviceColors = colorArrowsByService
-            ? vertices.Where(v => v.Column == DiagramColumn.Services).Select(v => v.Id).Order(StringComparer.Ordinal)
+            ? vertices.Where(v => v.IsService).Select(v => v.Id).Order(StringComparer.Ordinal)
                 .Zip(ArrowPalette().Distinct(StringComparer.Ordinal), (id, color) => (id, color))
                 .ToDictionary(pair => pair.id, pair => pair.color, StringComparer.Ordinal)
             : null;
@@ -86,17 +89,24 @@ internal static class NetworkDiagramLayout
             .Concat(members[""].GroupBy(vertex => vertex.Column).Select(column => new Band("", column.ToArray(), [])))).ToArray();
         var targetsOnFrame = bands.SelectMany(band => band.Children.Prepend(band))
             .Where(band => band.Name.Length != 0 && band.Children.Length == 0 &&
-                band.Vertices.Length == 1 && band.Vertices[0].Column != DiagramColumn.Services)
+                band.Vertices.Length == 1 && !band.Vertices[0].IsService)
             .Select(band => band.Vertices[0].Id).ToHashSet(StringComparer.Ordinal);
 
-        var serviceOrder = bands.SelectMany(band => band.AllVertices.Where(v => v.Column == DiagramColumn.Services))
+        var serviceOrder = bands.SelectMany(band => band.AllVertices.Where(v => v.IsService))
             .Select((service, index) => (service.Id, index)).ToDictionary(pair => pair.Id, pair => pair.index);
         double CallerPosition(DiagramVertex v) => incoming[v.Id]
             .Select(link => (double)serviceOrder[link.Source]).DefaultIfEmpty(0).Average();
 
         var passages = new List<double>();
         var rows = new Dictionary<string, Row>();
-        var positionedBands = PlaceBands(bands, [42, 42, 42]);
+        var positionedBands = PlaceBands(bands, StartHeights(42));
+
+        double[] StartHeights(double y)
+        {
+            var heights = new double[columns.Length];
+            Array.Fill(heights, y);
+            return heights;
+        }
 
         PositionedBand[] PlaceBands(Band[] siblings, double[] nextY)
         {
@@ -105,9 +115,9 @@ internal static class NetworkDiagramLayout
                          .ThenBy(band => band.HasServices ? 0 : band.AllVertices.Average(CallerPosition)))
             {
                 // A shared frame also occupies the columns between its leftmost and rightmost nodes.
-                var columns = band.AllVertices.Select(vertex => (int)vertex.Column).ToArray();
-                var first = columns.Min();
-                var last = columns.Max();
+                var occupied = band.AllVertices.Select(ColumnIndex).ToArray();
+                var first = occupied.Min();
+                var last = occupied.Max();
                 var position = PlaceBand(band, nextY[first..(last + 1)].Max());
                 positioned.Add(position);
                 for (var column = first; column <= last; column++)
@@ -122,21 +132,28 @@ internal static class NetworkDiagramLayout
             passages.Add(bandTop - 18);
             var named = band.Name.Length > 0;
             var firstY = bandTop + (named ? HeaderHeight + 26 : 0);
-            double[] nextY = [firstY, firstY, firstY];
+            var nextY = StartHeights(firstY);
             var bottom = firstY;
-            var integrationY = firstY;
-            foreach (var column in band.Vertices.GroupBy(vertex => vertex.Column)
-                         .OrderByDescending(column => column.Key == DiagramColumn.Services))
+            foreach (var column in band.Vertices.Where(vertex => vertex.IsService).GroupBy(ColumnIndex))
+                RecordRows(column.Key, PlaceRows(column, firstY));
+
+            var integrationY = bottom > firstY ? bottom + RowGap : firstY;
+            var serviceBands = PlaceBands(band.Children.Where(child => child.HasServices).ToArray(), nextY);
+            foreach (var column in band.Vertices.Where(vertex => !vertex.IsService).GroupBy(ColumnIndex))
             {
-                var isServiceColumn = column.Key == DiagramColumn.Services;
-                var end = PlaceRows(isServiceColumn ? column : column.OrderBy(CallerPosition), integrationY);
-                if (isServiceColumn) integrationY = end + RowGap;
-                nextY[(int)column.Key] = end + BandGap;
-                bottom = Math.Max(bottom, end);
+                var startY = Math.Max(integrationY, nextY[column.Key] - BandGap + RowGap);
+                RecordRows(column.Key, PlaceRows(column.OrderBy(CallerPosition), startY));
             }
-            var nested = PlaceBands(band.Children, nextY);
+
+            var nested = serviceBands.Concat(PlaceBands(band.Children.Where(child => !child.HasServices).ToArray(), nextY)).ToArray();
             bottom = Math.Max(bottom, nested.Select(child => child.Bottom).DefaultIfEmpty(firstY).Max());
             return new PositionedBand(band, bandTop, bottom + (named ? 26 : 0), nested);
+
+            void RecordRows(int column, double end)
+            {
+                nextY[column] = end + BandGap;
+                bottom = Math.Max(bottom, end);
+            }
         }
 
         double PlaceRows(IEnumerable<DiagramVertex> column, double y)
@@ -156,9 +173,11 @@ internal static class NetworkDiagramLayout
 
         var wires = links.Select(link =>
         {
-            var column = byId[link.Target].Column;
-            return new Wire(link, column, column == DiagramColumn.SvcDependencies ? 0 : 1,
-                column == DiagramColumn.OtherDependencies ? 0 : 1);
+            var source = ColumnIndex(byId[link.Source]);
+            var target = ColumnIndex(byId[link.Target]);
+            if (target < source) return new Wire(link, source - 1, Exit: 0, Entry: 1);
+            if (target > source) return new Wire(link, source, Exit: 1, Entry: 0);
+            return new Wire(link, null, Exit: 1, Entry: 1);
         }).ToArray();
         var ends = wires.SelectMany(w => new[]
         {
@@ -178,12 +197,13 @@ internal static class NetworkDiagramLayout
         double EndY(Wire wire) => rows[wire.Link.Target].At(fractions[(wire.Link.Id, false)]);
 
         var laneByEdge = new Dictionary<string, int>();
-        double ReserveLanes(DiagramColumn side, double minimumGap)
+        var wiresByGap = wires.Where(wire => wire.Gap.HasValue).ToLookup(wire => wire.Gap);
+        double ReserveLanes(int gap, double minimumGap)
         {
-            var sideWires = wires.Where(w => w.Column == side).ToArray();
+            var gapWires = wiresByGap[gap];
             // Process lower exits first so that higher exits take the outer lanes when their spans overlap.
             var starts = new List<double>();
-            foreach (var wire in sideWires.Where(w => StartY(w) < EndY(w))
+            foreach (var wire in gapWires.Where(w => StartY(w) < EndY(w))
                          .OrderByDescending(StartY).ThenBy(w => w.Link.Id, StringComparer.Ordinal))
             {
                 var lane = starts.FindIndex(start => EndY(wire) + LaneStep <= start);
@@ -196,22 +216,32 @@ internal static class NetworkDiagramLayout
                 laneByEdge.Add(wire.Link.Id, lane);
             }
 
-            var targetPadding = sideWires.Any(w => targetsOnFrame.Contains(w.Link.Target)) ? FramePadding : 0;
+            var targetPadding = gapWires.Any(w => targetsOnFrame.Contains(w.Link.Target)) ? FramePadding : 0;
             return Math.Max(minimumGap, targetPadding + 2 * LaneInset + (starts.Count - 1) * LaneStep);
         }
 
-        var columnPadding = new double[3];
+        var columnPadding = new double[columns.Length];
         foreach (var band in bands)
         {
             if (band.Name.Length == 0) continue;
             foreach (var vertex in band.Vertices)
-                columnPadding[(int)vertex.Column] = Math.Max(columnPadding[(int)vertex.Column], FramePadding);
+            {
+                var column = ColumnIndex(vertex);
+                columnPadding[column] = Math.Max(columnPadding[column], FramePadding);
+            }
             foreach (var vertex in band.Children.SelectMany(child => child.Vertices))
-                columnPadding[(int)vertex.Column] = 2 * FramePadding;
+                columnPadding[ColumnIndex(vertex)] = 2 * FramePadding;
         }
-        double Gap(int left) => Math.Max(MinimumColumnGap, columnPadding[left] + columnPadding[left + 1] + 2 * Stub);
-        var centerX = 140 + NodeWidth + ReserveLanes(DiagramColumn.SvcDependencies, Gap(0));
-        double[] columnXs = [140, centerX, centerX + NodeWidth + ReserveLanes(DiagramColumn.OtherDependencies, Gap(1))];
+        var columnXs = new double[columns.Length];
+        var corridorWidths = new double[columns.Length - 1];
+        columnXs[0] = 140;
+        for (var i = 0; i < corridorWidths.Length; i++)
+        {
+            var minimum = Math.Max(MinimumColumnGap, columnPadding[i] + columnPadding[i + 1] + 2 * Stub);
+            var emptyColumns = (long)columns[i + 1] - columns[i] - 1;
+            corridorWidths[i] = ReserveLanes(i, minimum);
+            columnXs[i + 1] = columnXs[i] + NodeWidth + corridorWidths[i] + emptyColumns * (NodeWidth + MinimumColumnGap);
+        }
         var frames = new List<Frame>();
         var nodes = new Dictionary<string, Node>();
         foreach (var position in positionedBands) AddBand(position, null);
@@ -222,11 +252,11 @@ internal static class NetworkDiagramLayout
             Frame? frame = null;
             if (band.Name.Length > 0)
             {
-                var columns = band.Vertices.Select(vertex => (X: columnXs[(int)vertex.Column], Padding: FramePadding))
+                var extents = band.Vertices.Select(vertex => (X: columnXs[ColumnIndex(vertex)], Padding: FramePadding))
                     .Concat(band.Children.SelectMany(child => child.Vertices)
-                        .Select(vertex => (X: columnXs[(int)vertex.Column], Padding: 2 * FramePadding))).ToArray();
-                var left = columns.Min(column => column.X - column.Padding);
-                var right = columns.Max(column => column.X + NodeWidth + column.Padding);
+                        .Select(vertex => (X: columnXs[ColumnIndex(vertex)], Padding: 2 * FramePadding))).ToArray();
+                var left = extents.Min(column => column.X - column.Padding);
+                var right = extents.Max(column => column.X + NodeWidth + column.Padding);
                 frame = new Frame(NetworkMapGenerator.Id("container:" + band.Name.ToUpperInvariant()), band.Name,
                     new DiagramBox(left, position.Top, right - left, position.Bottom - position.Top), parent);
                 frames.Add(frame);
@@ -235,7 +265,7 @@ internal static class NetworkDiagramLayout
             foreach (var vertex in band.Vertices)
             {
                 var row = rows[vertex.Id];
-                nodes[vertex.Id] = new Node(vertex.Id, new DiagramBox(columnXs[(int)vertex.Column], row.Top, NodeWidth, row.Height),
+                nodes[vertex.Id] = new Node(vertex.Id, new DiagramBox(columnXs[ColumnIndex(vertex)], row.Top, NodeWidth, row.Height),
                     frame, vertex.Label);
             }
             foreach (var child in position.Children) AddBand(child, frame);
@@ -255,7 +285,7 @@ internal static class NetworkDiagramLayout
         double LaneX(Route route, int lane)
         {
             var offset = LaneInset + lane * LaneStep;
-            return route.Wire.Exit == 0 ? centerX - offset : centerX + NodeWidth + offset;
+            return route.Wire.Exit == 0 ? route.Start.Box.X - offset : route.Start.Box.Right + offset;
         }
 
         var targetCells = routes.Select(route => route.End.CellId).ToHashSet(StringComparer.Ordinal);
@@ -265,7 +295,7 @@ internal static class NetworkDiagramLayout
         var anchors = routes.SelectMany(r => new[] { r.Start.Anchor, r.End.Anchor }).ToArray();
         var laneXs = routes.Where(route => laneByEdge.ContainsKey(route.Wire.Link.Id))
             .Select(route => LaneX(route, laneByEdge[route.Wire.Link.Id]));
-        var xs = anchors.Select(p => p.X).Concat(RoutingLanes(columnXs)).Concat(laneXs);
+        var xs = anchors.Select(p => p.X).Concat(RoutingLanes(columnXs, corridorWidths)).Concat(laneXs);
         if (frames.Any(frame => frame.Parent is not null || targetCells.Contains(frame.Id)))
             xs = xs.Concat(frameObstacles.SelectMany(box => new[] { box.X - 6, box.Right + 6 }));
         var ys = anchors.Select(p => p.Y).Concat(passages)
@@ -317,7 +347,7 @@ internal static class NetworkDiagramLayout
         }
     }
 
-    private static IEnumerable<double> RoutingLanes(double[] columnXs)
+    private static IEnumerable<double> RoutingLanes(double[] columnXs, double[] corridorWidths)
     {
         var first = columnXs[0];
         var last = columnXs[^1] + NodeWidth;
@@ -328,9 +358,14 @@ internal static class NetworkDiagramLayout
         }
         for (var i = 0; i < columnXs.Length - 1; i++)
         {
-            var right = columnXs[i] + NodeWidth;
-            for (var x = right + Stub; x < columnXs[i + 1]; x += LaneStep)
-                yield return x;
+            var leftEdge = columnXs[i] + NodeWidth;
+            var rightEdge = columnXs[i + 1];
+            var hasEmptyColumns = rightEdge - leftEdge > corridorWidths[i];
+            for (var offset = Stub; offset < corridorWidths[i]; offset += LaneStep)
+            {
+                yield return leftEdge + offset;
+                if (hasEmptyColumns) yield return rightEdge - offset;
+            }
         }
     }
 

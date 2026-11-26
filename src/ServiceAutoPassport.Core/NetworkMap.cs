@@ -11,6 +11,7 @@ public sealed class NetworkServiceInput
 {
     public string J2File { get; set; } = "";
     public string Label { get; set; } = "";
+    public int DiagramColumn { get; set; }
     public string Block { get; set; } = NetworkTargetSettings.DefaultBlock;
     public string? ParentBlock { get; set; }
     public string YamlService { get; set; } = "";
@@ -404,15 +405,17 @@ public static class NetworkMapGenerator
     }
 
     private static DiagramVertex ServiceVertex(NetworkServiceInput service) =>
-        new(service.Id, service.Label, DiagramColumn.Services, service.Block?.Trim() ?? "", service.ParentBlock?.Trim() ?? "");
+        new(service.Id, service.Label, service.DiagramColumn, service.Block?.Trim() ?? "", service.ParentBlock?.Trim() ?? "",
+            IsService: true);
 
     private static DiagramVertex ExternalVertex(NetworkConnection connection)
     {
         var options = connection.ExternalTarget;
         var label = string.IsNullOrWhiteSpace(options.Label) ? connection.SuggestedTargetLabel : options.Label;
         var column = connection.HostKeys.Any(key => key.StartsWith("SVC_", StringComparison.Ordinal))
-            ? DiagramColumn.SvcDependencies : DiagramColumn.OtherDependencies;
-        return new(connection.TargetId, label, column, options.Block?.Trim() ?? "", options.ParentBlock?.Trim() ?? "");
+            ? -1 : 1;
+        return new(connection.TargetId, label, column, options.Block?.Trim() ?? "", options.ParentBlock?.Trim() ?? "",
+            IsService: false);
     }
 
     private static NetworkTarget[] Targets(NetworkAnalysis analysis)
@@ -453,7 +456,7 @@ public static class NetworkMapGenerator
 
     private static DiagramVertex[] VisibleVertices(NetworkAnalysis analysis, NetworkTarget[] targets) =>
         analysis.Services.Select(ServiceVertex)
-            .Concat(targets.Where(target => target.Vertex.Column != DiagramColumn.Services).Select(target => target.Vertex)).ToArray();
+            .Concat(targets.Where(target => !target.Vertex.IsService).Select(target => target.Vertex)).ToArray();
 
     public static string CreateDiagram(NetworkAnalysis analysis)
     {

@@ -57,7 +57,7 @@ internal static class NetworkTableTransformer
         {
             var vertex = target.Vertex;
             var container = vertex.Container;
-            var useContainerName = vertex.Column != DiagramColumn.Services && container.Length > 0 &&
+            var useContainerName = !vertex.IsService && container.Length > 0 &&
                 !container.Equals(NetworkTargetSettings.DefaultBlock, StringComparison.OrdinalIgnoreCase) && !sharedContainers.Contains(container);
             html.Append("<tr>");
             AppendCell(html, "td", useContainerName ? container : vertex.Label);
