@@ -1,5 +1,4 @@
 using System.Text.RegularExpressions;
-using Microsoft.VisualBasic.FileIO;
 
 namespace ServiceAutoPassport.Core;
 
@@ -52,24 +51,11 @@ public static partial class NetworkParameterCatalog
         var literalKeys = targets.Where(pair => IsLiteralKey(pair.Key))
             .ToLookup(pair => DisplayParameter(pair.Key, pair.Value), pair => pair.Key, StringComparer.Ordinal);
         var edits = new Dictionary<string, NetworkParameterEdit>(StringComparer.Ordinal);
-        var lines = text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n').Split('\n');
+        var separator = DelimitedTable.DetectSeparator(text);
         var first = true;
-        for (var i = 0; i < lines.Length; i++)
+        foreach (var (lineNumber, columns) in DelimitedTable.Read(text.TrimStart('\uFEFF'), separator))
         {
-            if (string.IsNullOrWhiteSpace(lines[i])) continue;
-
-            var lineNumber = i + 1;
-            using var parser = new TextFieldParser(new StringReader(lines[i]));
-            parser.SetDelimiters("\t");
-            parser.TrimWhiteSpace = false;
-            string[]? columns;
-            try { columns = parser.ReadFields(); }
-            catch (MalformedLineException error)
-            {
-                throw new InvalidDataException($"Строка {lineNumber}: проверьте кавычки и разделители.", error);
-            }
-
-            if (columns is null || columns.Length is < 3 or > 4)
+            if (columns.Length is < 3 or > 4)
                 throw new InvalidDataException($"Строка {lineNumber}: нужны три колонки Excel, включая «Блок». Четвёртая колонка «Блок-родитель» необязательна.");
 
             var parameter = columns[0].Trim();

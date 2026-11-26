@@ -126,7 +126,7 @@ internal sealed class NetworkParametersForm : Form
         ReadDraft();
         using var dialog = new TablePasteForm<IReadOnlyDictionary<string, NetworkParameterEdit>>("Вставить параметры из Excel",
             "Вставьте экспорт приложения или колонки «Найденный параметр», «Название элемента», «Блок» " +
-            "и необязательную колонку «Блок-родитель» (Ctrl+V).",
+            "и необязательную колонку «Блок-родитель» (Ctrl+V). Разделитель — точка с запятой или табуляция.",
             "Импортировать", text => NetworkParameterCatalog.ParseEntries(text, _parameterSources, _draft, _services));
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 

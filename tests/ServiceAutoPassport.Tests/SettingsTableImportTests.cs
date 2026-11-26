@@ -10,12 +10,45 @@ public sealed class SettingsTableImportTests
     {
         var entries = new Dictionary<string, KeyDescriptionEntry>
         {
-            ["RICH_DESCRIPTION"] = new("<p>Первая \"строка\"</p>\r\n\r\n<p>Вторая\tстрока</p>", true),
+            ["RICH_DESCRIPTION"] = new("<p>Первая; \"строка\"</p>\r\n\r\n<p>Вторая\tстрока</p>", true),
             ["PLAIN_DESCRIPTION"] = new("Пример <b>разметки</b>", false)
         };
-        var imported = KeyDescriptionImport.ParseEntries(KeyDescriptionImport.Export(entries));
+        var export = KeyDescriptionImport.Export(entries);
+        Assert.StartsWith("Ключ из J2;Описание;HTML\r\n", export);
+        var imported = KeyDescriptionImport.ParseEntries(export);
         Assert.Equal(entries.ToArray(), imported.ToArray());
         Assert.True(KeyDescriptionImport.ParseEntries("KEY\t<b>Описание</b>")["KEY"].IsHtml);
+    }
+
+    [Theory]
+    [InlineData("Ключ;Описание\r\nKEY;\"Описание; с разделителем\"", "Описание; с разделителем")]
+    [InlineData("KEY\tОписание; с разделителем", "Описание; с разделителем")]
+    [InlineData("KEY Описание; с разделителем", "Описание; с разделителем")]
+    public void ImportsKeyDescriptionPairsWithEitherSeparator(string text, string description)
+    {
+        Assert.Equal(description, KeyDescriptionImport.ParseEntries(text)["KEY"].Description);
+    }
+
+    [Fact]
+    public void ImportsEarlierTabSeparatedExports()
+    {
+        var descriptions = KeyDescriptionImport.ParseEntries("Ключ из J2\tОписание\tHTML\r\nKEY\t<b>Text</b>\tНет");
+        Assert.False(descriptions["KEY"].IsHtml);
+        var networks = NetworkParameterCatalog.ParseEntries(
+            "Найденный параметр\tНазвание элемента\tБлок\tБлок-родитель\tАвтоназвание\tАвтоблок\tРодитель задан\tКлюч подключения\tФайл сервиса\tИмя сервиса\tПеременные пути\r\n" +
+            "API_HOST\tУдалённый; API\t\t\tДа\tНет\tДа\t\t\t\t", new Dictionary<string, NetworkTargetSettings>(),
+            new Dictionary<string, NetworkParameterEdit>(), []);
+        Assert.Equal(new NetworkParameterEdit("Удалённый; API", "") { LabelIsAutomatic = true, ParentBlock = "" },
+            networks["parameter:API_HOST"]);
+    }
+
+    [Theory]
+    [InlineData("API_HOST;\"Удалённый; API\";;Родитель")]
+    [InlineData("API_HOST\tУдалённый; API\t\tРодитель")]
+    public void ImportsShortNetworkTablesWithEitherSeparator(string text)
+    {
+        var edits = NetworkParameterCatalog.ParseExcel(text, new Dictionary<string, NetworkTargetSettings>());
+        Assert.Equal(new NetworkParameterEdit("Удалённый; API", "") { ParentBlock = "Родитель" }, edits["parameter:API_HOST"]);
     }
 
     [Theory]
@@ -74,6 +107,7 @@ public sealed class SettingsTableImportTests
                 ["parameter:OTHER_HOST"] = new("Другой\tхост", "") { ParentBlock = "", BlockIsAutomatic = true }
             };
             var export = NetworkParameterCatalog.Export(draft, source.Targets, legacySource ? [] : source.Services);
+            Assert.StartsWith("Найденный параметр;Название элемента;Блок;Блок-родитель;", export);
 
             var destination = Settings("second-checkout", legacySource ? "Было" : "Стало");
             var analysis = importBeforeAnalysis ? null : NetworkMapGenerator.Analyze(root, destination);

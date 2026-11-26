@@ -121,7 +121,7 @@ internal sealed class KeyDescriptionsForm : Form
     {
         using var dialog = new TablePasteForm<IReadOnlyDictionary<string, KeyDescriptionEntry>>("Вставить описания из Excel",
             "Вставьте экспорт приложения или пары «ключ — описание» из Excel (Ctrl+V). " +
-            "Для пар подойдёт табуляция или пробел.",
+            "Разделитель — точка с запятой, табуляция или пробел.",
             "Импортировать", KeyDescriptionImport.ParseEntries);
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 

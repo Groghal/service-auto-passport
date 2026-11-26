@@ -13,7 +13,7 @@ public static partial class NetworkParameterCatalog
         IReadOnlyDictionary<string, NetworkTargetSettings> targets, IReadOnlyList<NetworkServiceInput> services)
     {
         var files = ServiceFiles(services);
-        return TabSeparatedTable.Write(new[] { TransferHeader }.Concat(entries.Select(pair =>
+        return DelimitedTable.Write(new[] { TransferHeader }.Concat(entries.Select(pair =>
         {
             var (key, edit) = pair;
             var target = targets.GetValueOrDefault(key) ?? new NetworkTargetSettings();
@@ -21,8 +21,8 @@ public static partial class NetworkParameterCatalog
             return new[]
             {
                 DisplayParameter(key, target, source), edit.Label, edit.Block, edit.ParentBlock ?? "",
-                TabSeparatedTable.WriteFlag(edit.LabelIsAutomatic), TabSeparatedTable.WriteFlag(edit.BlockIsAutomatic),
-                TabSeparatedTable.WriteFlag(edit.ParentBlock is not null),
+                DelimitedTable.WriteFlag(edit.LabelIsAutomatic), DelimitedTable.WriteFlag(edit.BlockIsAutomatic),
+                DelimitedTable.WriteFlag(edit.ParentBlock is not null),
                 source is null ? "" : key, source?.J2 ?? "", source?.Service ?? "", source?.PathVariables ?? ""
             };
         })));
@@ -32,14 +32,15 @@ public static partial class NetworkParameterCatalog
         IReadOnlyDictionary<string, NetworkTargetSettings> targets, IReadOnlyDictionary<string, NetworkParameterEdit> draft,
         IReadOnlyList<NetworkServiceInput> services)
     {
-        if (!TabSeparatedTable.HasHeader(text, TransferHeader)) return ParseExcel(text, targets, draft);
+        var separator = DelimitedTable.DetectSeparator(text);
+        if (!DelimitedTable.HasHeader(text, TransferHeader, separator)) return ParseExcel(text, targets, draft);
 
         var files = ServiceFiles(services);
         var existing = targets.Keys.Concat(draft.Keys).Where(IsLiteralKey).Distinct(StringComparer.Ordinal)
             .ToDictionary(key => key, key => FindSource(key, targets.GetValueOrDefault(key), draft.GetValueOrDefault(key)?.Source, files),
                 StringComparer.Ordinal);
         var entries = new Dictionary<string, NetworkParameterEdit>(StringComparer.Ordinal);
-        foreach (var (number, cells) in TabSeparatedTable.Read(text.TrimStart('\uFEFF')).Skip(1))
+        foreach (var (number, cells) in DelimitedTable.Read(text.TrimStart('\uFEFF'), separator).Skip(1))
         {
             if (cells.Length != TransferHeader.Length)
                 throw new InvalidDataException($"Строка {number}: число ячеек не совпадает с заголовками экспорта.");
@@ -65,12 +66,12 @@ public static partial class NetworkParameterCatalog
             }
 
             var parent = cells[3].Trim();
-            var hasParent = TabSeparatedTable.ReadFlag(cells[6], number, TransferHeader[6]);
+            var hasParent = DelimitedTable.ReadFlag(cells[6], number, TransferHeader[6]);
             var entry = new NetworkParameterEdit(label, cells[2].Trim())
             {
                 ParentBlock = hasParent || parent.Length > 0 ? parent : null,
-                LabelIsAutomatic = TabSeparatedTable.ReadFlag(cells[4], number, TransferHeader[4]),
-                BlockIsAutomatic = TabSeparatedTable.ReadFlag(cells[5], number, TransferHeader[5]),
+                LabelIsAutomatic = DelimitedTable.ReadFlag(cells[4], number, TransferHeader[4]),
+                BlockIsAutomatic = DelimitedTable.ReadFlag(cells[5], number, TransferHeader[5]),
                 Source = source
             };
             if (!entries.TryAdd(key, entry))
